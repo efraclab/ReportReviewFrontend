@@ -9,20 +9,28 @@ import {
   Outlet,
 } from "react-router-dom";
 
-import Login           from "./pages/Login";
-import DashboardPage   from "./pages/DashboardPage";
-import UploadPage      from "./pages/UploadPage";
-import PreviewPage     from "./pages/PreviewPage";
-import ReviewPage      from "./pages/ReviewPage";
-import RegNoEntryPage  from "./pages/RegNoEntryPage";
+import Login from "./pages/Login";
+import DashboardPage from "./pages/DashboardPage";
+import UploadPage from "./pages/UploadPage";
+import PreviewPage from "./pages/PreviewPage";
+import ReviewPage from "./pages/ReviewPage";
+import RegNoEntryPage from "./pages/RegNoEntryPage";
 import RegNoReviewPage from "./pages/RegNoReviewPage";
 
 import { AppProvider, useAppContext } from "./AppContext";
-import { getReview, pruneExpired }    from "./services/reviewHistoryStore";
-import type { UploadedFile }          from "./types/UploadedFile";
+import { getReview, pruneExpired } from "./services/reviewHistoryStore";
+import type { UploadedFile } from "./types/UploadedFile";
 
 // ─── Auth helpers ─────────────────────────────────────────────────────────────
 
+//Bypass login for now:
+
+function isAuthenticated(): boolean {
+  // Bypass authentication for development/testing
+  return true;
+}
+
+/* 
 function isAuthenticated(): boolean {
   const token = localStorage.getItem("authToken");
   if (!token) return false;
@@ -39,6 +47,7 @@ function isAuthenticated(): boolean {
     return false;
   }
 }
+*/
 
 // ─── Guards ───────────────────────────────────────────────────────────────────
 
@@ -60,7 +69,7 @@ function LoginWrapper() {
 }
 
 function DashboardWrapper() {
-  const navigate   = useNavigate();
+  const navigate = useNavigate();
   const { clearAll } = useAppContext();
 
   const handleLogout = () => {
@@ -197,17 +206,17 @@ export default function App() {
 
           {/* Protected */}
           <Route element={<ProtectedRoute />}>
-            <Route path="/"               element={<DashboardWrapper />} />
-            <Route path="/upload"         element={<UploadWrapper />} />
+            <Route path="/" element={<DashboardWrapper />} />
+            <Route path="/upload" element={<UploadWrapper />} />
             <Route path="/upload/preview" element={<PreviewWrapper />} />
-            <Route path="/upload/review"  element={<ReviewWrapper />} />
+            <Route path="/upload/review" element={<ReviewWrapper />} />
 
             {/* /regno        — manual entry (no pre-fill)          */}
             {/* /regno/:regNo — deep-link with reg no in URL param  */}
             {/* /regno/review — review result page (must come last) */}
-            <Route path="/regno"          element={<RegNoEntryWrapper />} />
-            <Route path="/regno/:regNo"   element={<RegNoEntryWrapper />} />
-            <Route path="/regno/review"   element={<RegNoReviewWrapper />} />
+            <Route path="/regno" element={<RegNoEntryWrapper />} />
+            <Route path="/regno/:regNo" element={<RegNoEntryWrapper />} />
+            <Route path="/regno/review" element={<RegNoReviewWrapper />} />
           </Route>
 
           {/* Fallback */}
