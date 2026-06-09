@@ -314,12 +314,12 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
   }, [regNo, loading, checking, runReview]);
 
   // ── Auto-trigger when a reg number arrives from the URL ─────────────────────
-  // useEffect(() => {
-  //   if (initialRegNo?.trim()) {
-  //     startReview(initialRegNo.trim());
-  //   }
-  //   // eslint-disable-next-line react-hooks/exhaustive-deps
-  // }, []); // intentionally run once on mount only
+  useEffect(() => {
+    if (initialRegNo?.trim()) {
+      startReview(initialRegNo.trim());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally run once on mount only
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && regNo.trim()) startReview();
