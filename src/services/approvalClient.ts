@@ -2,7 +2,7 @@
 // Thin HTTP client for the approval + audit-log endpoints added to the backend.
 // All functions are pure async helpers; they throw on non-OK responses.
 
-const BASE = "http://192.168.137.228:5165/api/find";
+const BASE = "http://192.168.2.240:5165/api/find";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

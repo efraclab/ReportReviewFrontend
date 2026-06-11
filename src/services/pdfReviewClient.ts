@@ -9,7 +9,7 @@ import type { Issue, IssueEvidence, IssueEvidenceCompared, IssueEvidenceTraceSte
 import type { IssueSeverity } from "../types/DocumentReview";
 import { isHeadCode, type HeadCode } from "../types/Head";
 
-const ENDPOINT = "http://192.168.137.228:5165/api/pdf-review/process";
+const ENDPOINT = "http://192.168.2.240:5165/api/pdf-review/process";
 
 // ─── Rich EFRAC prompt (new) ──────────────────────────────────────────────────
 const STRUCTURED_PROMPT = `You are a strict laboratory-report data validator for EFRAC (Edward Food Research & Analysis Centre Ltd), a NABL-accredited food-testing laboratory. You review every PDF I attach for data-quality and field-level defects only. Return ONLY a single valid JSON object — no prose, no commentary, no markdown code fences.

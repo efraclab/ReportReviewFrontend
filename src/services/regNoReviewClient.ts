@@ -17,8 +17,8 @@ import type {
   CoaUpdateResponse,
 } from "../types/RegNoReview";
 
-const FETCH_REVIEW_ENDPOINT = "http://192.168.137.228:5165/api/find/fetch-review";
-const UPDATE_ENDPOINT       = "http://192.168.137.228:5165/api/find/update";
+const FETCH_REVIEW_ENDPOINT = "http://192.168.2.240:5165/api/find/fetch-review";
+const UPDATE_ENDPOINT       = "http://192.168.2.240:5165/api/find/update";
 
 // ─── System prompt tuned for LIMS table rows (not PDFs) ───────────────────────
 const REG_NO_SYSTEM_PROMPT = `You are a strict laboratory-report data validator for EFRAC (Edward Food Research & Analysis Centre Ltd), a NABL-accredited food-testing laboratory. You are reviewing a single LIMS report identified by its registration number. You will receive structured data — a report header and a list of test-parameter rows pulled directly from the LIMS database (Trn105 joined with Trn205). Return ONLY a single valid JSON object — no prose, no commentary, no markdown code fences.
