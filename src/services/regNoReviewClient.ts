@@ -17,8 +17,8 @@ import type {
   CoaUpdateResponse,
 } from "../types/RegNoReview";
 
-const FETCH_REVIEW_ENDPOINT = "http://192.168.2.240:5165/api/find/fetch-review";
-const UPDATE_ENDPOINT       = "http://192.168.2.240:5165/api/find/update";
+const FETCH_REVIEW_ENDPOINT = "http://192.168.137.228:5166/api/find/fetch-review";
+const UPDATE_ENDPOINT       = "http://192.168.137.228:5166/api/find/update";
 
 // ─── System prompt tuned for LIMS table rows (not PDFs) ───────────────────────
 const REG_NO_SYSTEM_PROMPT = `You are a strict laboratory-report data validator for EFRAC (Edward Food Research & Analysis Centre Ltd), a NABL-accredited food-testing laboratory. You are reviewing a single LIMS report identified by its registration number. You will receive structured data — a report header and a list of test-parameter rows pulled directly from the LIMS database (Trn105 joined with Trn205). Return ONLY a single valid JSON object — no prose, no commentary, no markdown code fences.
@@ -39,32 +39,180 @@ Each row in the source data contains TWO group-related fields:
 When populating evidence.targetRows, you MUST use the raw "groupCode" value, never the "groupName". The UI uses groupCode to write back to the database.
 
 ────────────────────────────────────────────────────────
-DATA-VALIDATION RULES TO APPLY
+REPORT IDENTITY & DOCUMENT CONTROL
 ────────────────────────────────────────────────────────
+• Report number must conform to EFRAC/<Lab>/<YYMMDD><Serial>. Lab code must be from the approved list: FDS, MT, RA, WTR, MB, ENV, Gas, DR, VLDN, GOV, DXN. Invalid format → "error".
+• All sub-lab registration and receipt dates must be identical across sections. Mismatch → "error".
+• Batch No, Mfg Date, Use-By, Customer Name and Address must be consistent across all sub-lab rows → "error" if inconsistent.
+• Kind Attention field must start with a valid salutation: Mr./Mrs./Ms./Dr./Prof./Capt./Maj./Rev./Hon./Shri/Smt./M/s. Bare name without salutation → "error".
+• Customer name in rows must match TRF exactly → "error" if mismatched.
+• Sample Type / Description must match TRF verbatim → "error" if mismatched.
+• Standard/Guideline Applied must not be blank for regulated samples → "warning".
 
+────────────────────────────────────────────────────────
 DATE LOGIC
+────────────────────────────────────────────────────────
 • Sample Received Date ≤ Sample Registration Date. Inversion → "error".
+• Registration delay grading: 0–1 day = PASS; 2–3 days = "warning"; ≥4 days = "error".
+• Issue Date must not be a future date → "error".
 • Any other obviously inverted date sequence → "error".
+• Holding-time compliance per parameter type (apply where analysis start date is visible):
+  - Microbiology (water) ≤24h; Coliform ≤30h; BOD ≤48h; COD ≤28d; Cr(VI) ≤24h; VOCs in water ≤14d; Metals ≤6 months; Residual Free Chlorine ≤15 min (field only); pH/Temp/DO = field measurement only → "error" if violated.
+• Sub-lab analysis windows must be plausible: Sterility ≥14 days, BOD ≥5 days, Dioxin ≥12 days → "warning" if shorter.
+• Manufacturing Date < Receipt Date < Use-By Date must hold → "warning" if violated.
 
+────────────────────────────────────────────────────────
+MATRIX-PARAMETER APPLICABILITY
+────────────────────────────────────────────────────────
+• Every tested parameter must be applicable to the sample matrix:
+  - PDW (Packaged Drinking Water): Protein, Fat, Carbohydrate, Vitamins, Amino acids, Sugars, Cholesterol, Fatty acids, Caffeine, Alcohol are FORBIDDEN → "error".
+  - PDW: Aflatoxin is FORBIDDEN → "error". Methyl Mercury for non-seafood → "error".
+• Mandatory parameters must be present for the matrix:
+  - PDW per FSSAI 2.10.8: Coliform, TPC, pH, TDS, Hardness, heavy metals panel, 31-compound pesticide panel + Total, Gross Alpha, Gross Beta → absence → "error".
+  - Dairy: S. aureus + B. cereus + Salmonella mandatory. RTE foods: Listeria monocytogenes mandatory. Raw meat: Salmonella + E. coli O157 mandatory.
+• Speciation completeness: Total Hg must be present if Methyl Hg is reported (Total Hg ≥ Methyl Hg). Total As ≥ Inorganic As. Total Cr ≥ Cr(VI) → "error" if violated.
+• Result plausibility vs sample type: PDW TPC >100 CFU/mL = alarming; honey moisture >25% = implausible → "warning".
+• Label claim match: results must not contradict declared label claims → "error".
+• GMO-free claim + GMO 35S/NOS detected → "error". Organic claim + prohibited substance → "error".
+
+────────────────────────────────────────────────────────
 SPEC & VERDICT CONSISTENCY
+────────────────────────────────────────────────────────
 • Every numeric "Result" must be compared against its "Requirements" (NMT / NLT / range).
   - Result clearly breaches spec → "error".
   - Result within spec but obviously misclassified → "error".
 • Qualifier-bearing results (BLQ, BDL, "< X"): treat as passing NMT specs only when qualifier threshold ≤ spec limit. Otherwise → "error".
+• Decision rule with Measurement Uncertainty (MU): result ± MU crossing the spec limit without explicit decision-rule declaration → "warning".
+• Front-page or overall conformance statement must reflect the worst-case verdict. If any parameter is OOS but overall says Conforms → "error".
+• OOS results must be bold. Non-bold OOS result → "error".
+• Every parameter must have a Requirements value stated or "No regulatory limit prescribed". Blank Requirements → "error".
+• IS 10500 two-tier spec (AL/PL): AL=PASS; AL<result≤PL="Permissible without alternate source"; result>PL=REJECTED → "error" if verdict does not match tier.
 
+────────────────────────────────────────────────────────
+REGULATORY CITATION & METHOD REFERENCE
+────────────────────────────────────────────────────────
+• Standard cited must match matrix: FSSAI 2.10.8=PDW; 2.10.7=PNMW; 2.10.6=beverages; IS 9845=plastic FCM; IS 12252=PET; ISBT=CO₂ → "error" if mismatched.
+• Method namespace must match sub-lab: FD=Food; WTR=Water; MB=Microbiology; DR=Drug; GAS=Gas. Cross-namespace → "error".
+• Every parameter+method+matrix must be within NABL accreditation scope. Non-scope parameters must be flagged with asterisk → "error" if absent.
+• EPA method citations must include version; ISO citations must include year → "warning" if absent.
+• In-house methods must cite parent method (AOAC/APHA/IS/EPA) in NABL scope → "warning" if missing.
+• Export samples: destination-specific regulator requirements must be met (USFDA/TGA/EU FCM/Japan PRA/GACC) → "warning" if missing.
+• APEDA/EIC/Agmark/FSSAI ID/BIS Lic — if sample carries these, must appear on report → "error" if absent.
+• Matrix = chilli/grape/tea/basmati → ETO (ethylene oxide) panel mandatory → "warning" if absent.
+
+────────────────────────────────────────────────────────
 LOQ / UNIT HYGIENE
+────────────────────────────────────────────────────────
 • Every numeric result must carry a unit of measure (UOM). Missing UOM → "error".
 • LOQ and Result must share the same unit. Unit mismatch → "error".
 • LOQ greater than Result with no explanation → "warning".
+• LOD must be ≤ LOQ. LOD > LOQ → "error".
+• LOQ adequacy: LOQ >50% of spec limit = critically inadequate → "warning". LOQ = spec limit = boundary compliance cannot be confirmed → "warning".
+• For Pharma reports: LOQ must be ≤ 10% of the specification limit → "error" if violated.
+• Numeric value below LOQ must be expressed as "<LOQ" or "BLQ", not as "0" → "warning".
+• LOD and LOQ must not be used interchangeably (LOQ ≈ 3× LOD) → "warning" if confused.
+• MU absent when decision rule is declared → "warning".
 
+────────────────────────────────────────────────────────
 INTER-PARAMETER NUMERICAL RULES (apply whichever are checkable from the visible rows)
-• Cation–anion ionic balance must be within ±10 %. Deviation > 10 % → "warning"; > 20 % → "error".
-• Total Fat ≈ SFA + MUFA + PUFA + Trans Fat within ±10 %. Mismatch → "warning".
-• Total Hardness ≈ (Ca hardness + Mg hardness) within ±5 %. Mismatch → "warning".
+────────────────────────────────────────────────────────
 
+PROXIMATE / COMPOSITIONAL
+• Protein + Fat + Carbohydrate + Moisture + Ash ≈ 100% (±2%) on as-such basis → "warning" if outside.
+• Carbohydrate (by difference) = 100 − (Protein+Fat+Moisture+Ash) ±0.5% → "warning".
+• Total Carbohydrate ≥ Total Sugar ≥ Reducing Sugar → "warning" if violated.
+• Total Sugar ≥ Σ(Glucose+Fructose+Sucrose+Lactose+Maltose) → "warning".
+• Carbohydrate-sum check (always attempt, fallback-aware): locate the Result for "Carbohydrate" (or "Total Carbohydrate") and     "Total Sugar" (or "Total Sugars" / "Sugar"). Also search for "Dietary Fibre" (or "Total Dietary Fibre" / "Fibre" / "Crude Fibre") • match any of these name variants as the same parameter. 
+  • If BOTH Sugar and Fibre are found with numeric Results: Carbohydrate must be ≥ (Sugar + Fibre). Violation → "warning".
+  • If ONLY Sugar is found (Fibre genuinely absent from the report — not just unmatched): fall back to Carbohydrate ≥ Sugar alone. Violation → "warning".
+  • If ONLY Fibre is found (Sugar absent): fall back to Carbohydrate ≥ Fibre alone. Violation → "warning".
+  • Always use the actual numeric values found in the rows for this specific report — never invented or example numbers.
+  • Illustrative example ONLY (use real row values, not these numbers): if Sugar=41.30 and Fibre=4.02, then Carbohydrate must be ≥45.32. A reported Carbohydrate of 40.27 violates this since 40.27 < 45.32.
+  • Show in evidence.compared which of Sugar/Fibre were found and used, the threshold calculated, and the actual Carbohydrate result.
+• Total Fat ≥ Σ(SFA+MUFA+PUFA+Trans Fat) within ±10% → "warning".
+• Total Fat ≥ Σ(individual fatty acids — FAME sum) → "warning".
+• Total Protein ≥ any single Amino Acid; Total Protein ≥ Σ(individual amino acids) → "warning".
+• Dry basis value > as-such value for every nutrient (except moisture) → "warning" if violated.
+• Moisture must only be reported on as-such basis, never dry basis → "warning".
+• Ash ≥ Σ(individual minerals after unit conversion to same basis) → "warning".
+• Energy = (Protein×4)+(Carbs×4)+(Fat×9) ± 2 kcal/100g (Atwater) → "warning" if outside.
+• Salt (NaCl) ≥ Sodium × 2.5 when both reported → "warning".
+• kJ = kcal × 4.184 ± 1 kJ → "suggestion" if inconsistent.
+
+WATER CHEMISTRY
+• TDS ionic-sum check (always attempt if ≥1 ion present): fixed ion list = Chloride, Sulphate(s), Alkalinity, Calcium, Magnesium (match any naming variant, e.g. "Calcium (Ca)", "Alkalinity (CaCO3)"). Find whichever of these five are present with a numeric Result in the rows — could be 1, 2, 3, 4, or 5 of them. Sum only the numeric values found (ignore UOM entirely; exclude any ion reported as BLQ/"<X"/ND from the sum but still run the check using the rest). TDS Result must be ≥ this sum. Violation → "error". Skip only if ZERO of the five ions have a numeric Result anywhere in the rows.
+  Example: Chloride=5.26, Sulphate=6.05, Alkalinity=192.91, Calcium=53.42, Magnesium=13.81 → Σ=271.45. TDS=52 violates the rule since 52 < 271.45 → "error".
+  Show in evidence.compared which ions were used, their values, the calculated sum, and the TDS value.
+• Total Hardness = Calcium Hardness + Magnesium Hardness ± rounding → "warning" if mismatched.
+• Total Hardness > Calcium Hardness alone AND > Magnesium Hardness alone → "warning".
+• TDS ≈ 0.5–0.7 × Conductivity (µS/cm) for natural waters — e.g. Conductivity 1280 µS/cm implies expected TDS range of 640–896 mg/L. Reported TDS outside this computed range → "warning".
+• Ionic balance (±10%): Σcations (meq/L) ≈ Σanions (meq/L). Cations: Ca²⁺, Mg²⁺, Na⁺, K⁺. Anions: HCO₃⁻, CO₃²⁻, Cl⁻, SO₄²⁻, NO₃⁻. Deviation >10% → "warning"; >20% → "error".
+• BOD ≤ COD (always) → "error" if violated.
+• BOD/COD ratio 0.1–0.8 typical for wastewater; outside → "warning".
+• pH 6.5–8.5 for PDW per FSSAI 2.10.8 → "error" if outside.
+• TDS 75–500 mg/L for PDW per FSSAI 2.10.8 → "error" if outside.
+• Free Cl₂ ≤ Total Cl₂ → "warning" if violated.
+• Turbidity >1 NTU AND Taste="Agreeable" → contradiction → "warning".
+• Residual Free Chlorine detectable >0.05 mg/L AND Odour reported "Odourless", "Agreeable", or "Pleasant" (no chlorine/chemical odour noted) → contradiction → "warning". 
+• Residual Free Chlorine >0.05 mg/L while Odour is reported as Odourless/Agreeable/Pleasant: flag "Chlorine is typically detectable by odour above 0.05 mg/L; reported Odour is inconsistent with the RFC result" → "warning".
+• Colour Result >5 Hazen but Description states "colourless": flag "Colour result indicates coloured sample; description should be updated to reflect visible colour" → "warning".
+• Colour Result ≤5 Hazen but Description states "coloured" (or omits colourless where matrix expects it): flag "Colour result is within colourless threshold; description should confirm colourless appearance" → "warning".
+• pH 6.5–8.5 for PDW per FSSAI 2.10.8; outside → "error".
+• TDS 75–500 mg/L for PDW per FSSAI 2.10.8. Outside range → "error".
+• Alkalinity ≥ Carbonate + Bicarbonate → "warning" if inconsistent.
+
+HEAVY METALS / SPECIATION
+• Total Hg ≥ Methyl Hg → "error" if violated. If Methyl Hg result changes from BLQ to a numeric value, verify Total Hg is still ≥ that numeric value.
+• Total As ≥ Inorganic As → "error" if violated.
+• Total Cr ≥ Cr(VI) → "error" if violated.
+
+MICROBIOLOGY
+• E. coli ⊂ Coliforms — two directional checks, both mandatory:
+  • If Total Coliforms = Absent/Not Detected → E. coli MUST also be Absent/Not Detected. E. coli present when Coliforms absent is physically impossible → "error".
+  • If E. coli = Detected/Present → Total Coliforms MUST also be Detected/Present. E. coli detected but Coliforms absent or not reported is physically impossible → "error".
+  Note: Coliforms Detected + E. coli Absent is scientifically valid (not all Coliforms are E. coli) and must NOT be flagged as a violation.
+• If a microbiology result for E. coli or Coliforms changes between report versions (e.g. from Detected to Absent) without a corresponding change in analysis date → "error" (physically impossible re-classification without re-analysis).
+• TYMC ≥ Yeast count alone; TYMC ≥ Mould count alone → "warning".
+• PDW: any pathogen present = Critical OOS → "error".
+
+GAS / CO₂ ISBT
+• Purity ≥ 99.9% v/v → "error" if below.
+• Benzene ≤ 20 ppb v/v; Acetaldehyde ≤ 0.2 ppm v/v → "error" if exceeded.
+
+FOOD CONTACT / PACKAGING
+• Overall Migration (material) ≤ 10 mg/dm² per IS 9845 → "error". Overall Migration (simulant) ≤ 60 mg/L → "error".
+
+PESTICIDES
+• Total Pesticide Residue ≥ each individual pesticide reported → "warning".
+• Total DDT ≥ Σ(2,4-DDT + 4,4-DDT + DDD isomers + DDE isomers) — if any individual DDT isomer result changes from BLQ to a numeric value, Total DDT must be updated to reflect the revised sum → "warning" if Total DDT < Σ(individual DDT isomers).
+• Σ(α+β+γ+δ HCH) = Total HCH → "warning" if mismatched.
+
+────────────────────────────────────────────────────────
 UNIT OF MEASURE
+────────────────────────────────────────────────────────
 • UOM must be consistent across rows for the same parameter. Inconsistency → "warning" (translatable) or "error" (not translatable).
+• Unit-matrix consistency: Solids: mg/kg, mg/100g, %; Liquids: mg/L, mg/100mL, %v/v; Gas: ppm v/v; Surface: mg/dm² → "error" if mismatched.
+• mg/mL vs mg/L confusion (mg/mL = 1000× mg/L) → "error".
+• ppm vs ppb (1 ppm = 1000 ppb) — flag if mixed in the same panel → "error".
+• CFU/g for solids; CFU/mL for liquids — never mixed → "warning".
 • Non-canonical but translatable UoM → "suggestion" with the canonical form stated.
+
+────────────────────────────────────────────────────────
+DATA INTEGRITY
+────────────────────────────────────────────────────────
+• Decimal pattern lock: ≥5 unrelated parameters sharing identical decimal portion → "error".
+• Sequential arithmetic pattern in results (5.01, 5.02, 5.03…) → "error".
+• 3+ unrelated parameters with exact same numeric value → "error".
+• Same value across different sub-lab groups for the same shared parameter — must reconcile → "warning".
+NOTE: Do NOT speculate about intent. State observations only. Do not use the word "fraud".
+
+────────────────────────────────────────────────────────
+CONFORMANCE AUTO-ATTACH TRIGGERS
+────────────────────────────────────────────────────────
+• Tin result = LOQ: flag "Tin reported at LOQ; verify by re-test" → "warning".
+• Methyl Mercury AND Total Hg both in rows: flag "Methyl Mercury speciation method differs from Total Hg method" → "suggestion".
+• FSSAI surveillance ID present: flag "FSSAI surveillance sample — chain of custody to be maintained" → "warning".
+• Any parameter OOS but overall conformance shows Conforms: flag "One or more parameters show Non-Conformance; overall verdict must be updated" → "error".
 
 ────────────────────────────────────────────────────────
 VOICE RULES
@@ -77,12 +225,12 @@ For each finding:
 ────────────────────────────────────────────────────────
 EVALUATION HEADS  (classify every finding into exactly one)
 ────────────────────────────────────────────────────────
-IDENTITY    — Identity & document integrity (report number, batch ID, completeness)
-DATES       — Date & workflow logic
-PARAMS      — Inter-parameter conflicts (spec vs result, LOQ, UoM, sums)
-MATRIX      — Matrix vs parameter applicability
-REGULATORY  — Regulatory & method references
-HYGIENE     — Formatting, language, decimal/sig-fig hygiene
+IDENTITY    — Identity & document integrity (report number, batch ID, customer metadata, sub-lab cross-consistency, salutation, sample condition)
+DATES       — Date & workflow logic (date sequence, holding times, registration delay, sub-lab date consistency)
+PARAMS      — Inter-parameter conflicts (spec vs result, LOQ/LOD/MU, UoM, sums, speciation, microbiology subsets, gas purity, irrigation limits)
+MATRIX      — Matrix vs parameter applicability (forbidden params, mandatory panel absence, label/fortification claim mismatch)
+REGULATORY  — Regulatory & method references (FSSAI codes, method namespace, NABL scope, export regulator, accreditation)
+HYGIENE     — Formatting, language, decimal/sig-fig hygiene, data-integrity anomalies, conformance remark, auto-attach comments
 
 ────────────────────────────────────────────────────────
 OUTPUT SCHEMA  (MUST follow exactly)
@@ -145,7 +293,6 @@ Rules:
 - Whenever a finding can be tied to one or more parameter rows, you MUST populate evidence.targetRows with the exact groupCode + parameter values that appear in the source data. This is how the UI lets reviewers fix the underlying record.
 - All string values MUST be valid JSON: escape every internal double-quote as \\" and every newline as \\n.
 - Output raw JSON only. Do not wrap in \`\`\` and do not add any text before or after. Do not truncate — finish every brace and bracket.`;
-
 function newCorrelationId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();

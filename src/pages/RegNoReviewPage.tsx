@@ -46,7 +46,6 @@ import {
   type AuditLogEntry,
 } from "../services/approvalClient";
 import type { LimsRow } from "../types/RegNoReview";
-import { useNavigate } from "react-router-dom";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants & tiny helpers
@@ -54,20 +53,58 @@ import { useNavigate } from "react-router-dom";
 
 type IssueAction = "pending" | "modified" | "ignored";
 
+// ─── Remark type classification (L1-M10) ─────────────────────────────────────
+const REMARK_TYPES = [
+  { type: "A", label: "Compliant",     leftBorder: "border-l-emerald-500", bg: "bg-emerald-50/40", textClass: "text-emerald-700", description: "All parameters within specification" },
+  { type: "B", label: "With caveat",   leftBorder: "border-l-amber-400",   bg: "bg-amber-50/40",   textClass: "text-amber-700",   description: "Complies subject to stated condition or scope limitation" },
+  { type: "C", label: "Non-compliant", leftBorder: "border-l-red-500",     bg: "bg-red-50/40",     textClass: "text-red-700",     description: "One or more parameters failed specification" },
+  { type: "D", label: "MU disclosed",  leftBorder: "border-l-blue-400",    bg: "bg-blue-50/40",    textClass: "text-blue-700",    description: "Measurement Uncertainty declared; decision rule applied per NABL-164" },
+  { type: "E", label: "Out of scope",  leftBorder: "border-l-slate-400",   bg: "bg-slate-50",      textClass: "text-slate-600",   description: "Parameter not in NABL accreditation scope — marked with asterisk" },
+] as const;
+
+function deriveRemarkType(issues: Array<{ severity: string; headCode?: string }>) {
+  if (!issues.length) return REMARK_TYPES[0];
+  const hasBlock = issues.some((i) => i.severity === "error");
+  const hasMU    = issues.some((i) => i.severity === "warning" && (i.headCode === "PARAMS" || i.headCode === "REGULATORY"));
+  const hasScope = issues.some((i) => i.headCode === "REGULATORY" && i.severity === "suggestion");
+  if (hasBlock)      return REMARK_TYPES[2]; // C
+  if (hasMU)         return REMARK_TYPES[3]; // D
+  if (hasScope)      return REMARK_TYPES[4]; // E
+  if (issues.length) return REMARK_TYPES[1]; // B
+  return REMARK_TYPES[0];
+}
+
+function deriveAutoAttach(issues: Array<{ title: string; description?: string; headCode?: string; severity: string }>) {
+  const text = issues.map((i) => `${i.title} ${i.description ?? ""}`).join(" ").toLowerCase();
+  const tags: { icon: string; text: string; severity: "warning" | "info" }[] = [];
+  if (text.includes("tin") && text.includes("loq"))
+    tags.push({ icon: "⚗", text: "Tin reported at LOQ — verify by re-test before issue.", severity: "warning" });
+  if (text.includes("methyl") && text.includes("mercury") && text.includes("total"))
+    tags.push({ icon: "🧪", text: "Methyl Mercury speciation method differs from Total Hg method.", severity: "info" });
+  if (text.includes("fssai") && (text.includes("surveillance") || text.includes("government")))
+    tags.push({ icon: "🏛", text: "FSSAI surveillance sample — chain of custody must be maintained.", severity: "warning" });
+  if (text.includes("pet") && (text.includes("migration") || text.includes("antimony")))
+    tags.push({ icon: "🧴", text: "PET-Sb context: low Sb indicates virgin resin or Ge/Ti-catalysed PET.", severity: "info" });
+  const hasConformanceMismatch = issues.some((i) => i.title.toLowerCase().includes("front") && i.title.toLowerCase().includes("conforms"));
+  if (hasConformanceMismatch)
+    tags.push({ icon: "⛔", text: "One or more parameters show Non-Conformance — overall verdict must be updated.", severity: "warning" });
+  return tags;
+}
+
 const issuesPercent = (s: number) => Math.max(0, Math.min(100, 100 - s));
 
 const SEVERITY_META: Record<IssueSeverity, {
   Icon: React.ElementType; iconClass: string; badge: string; leftBorder: string;
 }> = {
-  error: { Icon: XCircle, iconClass: "text-red-500", badge: "bg-red-100 text-red-700 border border-red-200", leftBorder: "border-l-red-500" },
-  warning: { Icon: AlertTriangle, iconClass: "text-amber-500", badge: "bg-amber-100 text-amber-700 border border-amber-200", leftBorder: "border-l-amber-400" },
-  suggestion: { Icon: Lightbulb, iconClass: "text-blue-500", badge: "bg-blue-100 text-blue-700 border border-blue-200", leftBorder: "border-l-blue-400" },
+  error:      { Icon: XCircle,       iconClass: "text-red-500",   badge: "bg-red-100 text-red-700 border border-red-200",     leftBorder: "border-l-red-500"   },
+  warning:    { Icon: AlertTriangle, iconClass: "text-amber-500", badge: "bg-amber-100 text-amber-700 border border-amber-200", leftBorder: "border-l-amber-400" },
+  suggestion: { Icon: Lightbulb,     iconClass: "text-blue-500",  badge: "bg-blue-100 text-blue-700 border border-blue-200",   leftBorder: "border-l-blue-400"  },
 };
 
 const ACTION_META: Record<IssueAction, { label: string; bg: string; text: string; border: string }> = {
-  pending: { label: "Pending", bg: "bg-slate-100", text: "text-slate-500", border: "border-slate-200" },
-  modified: { label: "Modified", bg: "bg-blue-50", text: "text-blue-700", border: "border-blue-200" },
-  ignored: { label: "Ignored", bg: "bg-slate-50", text: "text-slate-500", border: "border-slate-300" },
+  pending:  { label: "Pending",  bg: "bg-slate-100", text: "text-slate-500",  border: "border-slate-200" },
+  modified: { label: "Modified", bg: "bg-blue-50",   text: "text-blue-700",   border: "border-blue-200"   },
+  ignored:  { label: "Ignored",  bg: "bg-slate-50",  text: "text-slate-500",  border: "border-slate-300"  },
 };
 
 /**
@@ -147,16 +184,16 @@ function IssueCard({ issue, index, action, onAction, rowsLookup, onSaveEdits, al
       for (const c of compared) {
         const lab = c.label.toLowerCase().replace(/[\s_-]/g, "");
         if (lab === "uom" || lab === "unit" || lab === "unitofmeasure") return "uom" as const;
-        if (lab === "loq") return "loq" as const;
-        if (lab === "method") return "method" as const;
+        if (lab === "loq")                                               return "loq" as const;
+        if (lab === "method")                                            return "method" as const;
         if (lab === "requirements" || lab === "spec" || lab === "specification") return "requirements" as const;
       }
-      if (rc.includes("UOM") || rc.includes("UNIT")) return "uom" as const;
-      if (rc.includes("LOQ")) return "loq" as const;
+      if (rc.includes("UOM") || rc.includes("UNIT"))  return "uom" as const;
+      if (rc.includes("LOQ"))                          return "loq" as const;
       if (rc.includes("REG") || rc.includes("METHOD")) return "method" as const;
-      if (rc.includes("SPEC") || rc.includes("REQ")) return "requirements" as const;
-      if (hc === "REGULATORY") return "method" as const;
-      if (hc === "HYGIENE") return "uom" as const;
+      if (rc.includes("SPEC") || rc.includes("REQ"))  return "requirements" as const;
+      if (hc === "REGULATORY")                         return "method" as const;
+      if (hc === "HYGIENE")                            return "uom" as const;
       return "results" as const;
     })();
 
@@ -175,9 +212,9 @@ function IssueCard({ issue, index, action, onAction, rowsLookup, onSaveEdits, al
   const isBulk = targetRows.length > BULK_THRESHOLD;
 
   const resolvedBorder =
-    action === "modified" ? "border-l-blue-500" :
-      action === "ignored" ? "border-l-slate-300" :
-        m.leftBorder;
+    action === "modified" ? "border-l-blue-500"  :
+    action === "ignored"  ? "border-l-slate-300"  :
+    m.leftBorder;
 
   // drafts keyed as "groupCode::parameter::fieldName"
   const draftKey = (t: IssueTargetRow) => `${rowKey(t.groupCode, t.parameter)}::${t.fieldName}`;
@@ -306,6 +343,12 @@ function IssueCard({ issue, index, action, onAction, rowsLookup, onSaveEdits, al
             {issue.evidence?.rule?.code && (
               <span className="text-[9.5px] font-mono text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">{issue.evidence.rule.code}</span>
             )}
+            {/* Bold-enforcement indicator (Rule 6.3 — formatting defect) */}
+            {issue.headCode === "HYGIENE" && (issue.title.toLowerCase().includes("bold") || issue.title.toLowerCase().includes("formatting")) && (
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-slate-700 bg-slate-100 border border-slate-300 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                <span className="font-bold text-[10px]">B</span>fmt
+              </span>
+            )}
             {targetRows.length > 0 && (
               <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
                 <Pencil size={9} />editable
@@ -398,12 +441,13 @@ function IssueCard({ issue, index, action, onAction, rowsLookup, onSaveEdits, al
                     {/* Single input */}
                     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 space-y-2">
                       <div className="flex items-center gap-2">
-                        <span className={`text-[9px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 rounded border ${fieldName === "results" ? "bg-blue-50 text-blue-700 border-blue-200" :
-                            fieldName === "uom" ? "bg-purple-50 text-purple-700 border-purple-200" :
-                              fieldName === "loq" ? "bg-orange-50 text-orange-700 border-orange-200" :
-                                fieldName === "method" ? "bg-teal-50 text-teal-700 border-teal-200" :
-                                  "bg-slate-100 text-slate-600 border-slate-200"
-                          }`}>
+                        <span className={`text-[9px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 rounded border ${
+                          fieldName === "results"      ? "bg-blue-50 text-blue-700 border-blue-200"   :
+                          fieldName === "uom"          ? "bg-purple-50 text-purple-700 border-purple-200" :
+                          fieldName === "loq"          ? "bg-orange-50 text-orange-700 border-orange-200" :
+                          fieldName === "method"       ? "bg-teal-50 text-teal-700 border-teal-200"   :
+                                                         "bg-slate-100 text-slate-600 border-slate-200"
+                        }`}>
                           {fieldLabel}
                         </span>
                         <span className="text-[10px] text-slate-400">applied to all {targetRows.length} rows</span>
@@ -458,54 +502,55 @@ function IssueCard({ issue, index, action, onAction, rowsLookup, onSaveEdits, al
                   </div>
                 );
               })() : (
-                /* ── INDIVIDUAL ROW MODE ── */
-                <div className="space-y-2.5">
-                  {targetRows.map((t) => {
-                    const k = draftKey(t);
-                    const row = rowsLookup.get(rowKey(t.groupCode, t.parameter));
-                    const currentVal = row ? (row[t.fieldName as keyof typeof row] as string | undefined) ?? "—" : "—";
-                    const fieldLabel = TARGET_FIELD_LABEL[t.fieldName];
-                    return (
-                      <div key={k} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 space-y-1.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-slate-700 bg-white border border-slate-200 px-1.5 py-0.5 rounded font-mono">{t.groupCode}</span>
-                          <span className="text-[11px] font-semibold text-slate-800">{t.parameter}</span>
-                          {/* show all sibling groupCodes if multiple rows share same parameter */}
-                          {row?.uom && t.fieldName !== "uom" && <span className="text-[10px] text-slate-400 font-mono">({row.uom})</span>}
-                          <span className={`text-[9px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 rounded border ${t.fieldName === "results" ? "bg-blue-50 text-blue-700 border-blue-200" :
-                              t.fieldName === "uom" ? "bg-purple-50 text-purple-700 border-purple-200" :
-                                t.fieldName === "loq" ? "bg-orange-50 text-orange-700 border-orange-200" :
-                                  t.fieldName === "method" ? "bg-teal-50 text-teal-700 border-teal-200" :
-                                    "bg-slate-100 text-slate-600 border-slate-200"
-                            }`}>
-                            {fieldLabel}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 text-[10px]">
-                          <span className="text-slate-400 w-16 shrink-0">Current</span>
-                          <span className="font-mono text-slate-700">{currentVal}</span>
-                        </div>
-                        {row?.requirements && t.fieldName !== "requirements" && (
-                          <div className="flex items-center gap-2 text-[10px]">
-                            <span className="text-slate-400 w-16 shrink-0">Spec</span>
-                            <span className="font-mono text-slate-700">{row.requirements}</span>
-                          </div>
-                        )}
-                        <label className="flex items-center gap-2 text-[10px] text-slate-500">
-                          <span className="w-16 shrink-0 font-semibold">New {fieldLabel}</span>
-                          <input
-                            type="text"
-                            value={drafts[k] ?? ""}
-                            onChange={(e) => setDrafts((p) => ({ ...p, [k]: e.target.value }))}
-                            placeholder={t.suggestedValue ?? `Enter corrected ${fieldLabel.toLowerCase()}`}
-                            disabled={saving}
-                            className="flex-1 px-2 py-1 rounded border border-slate-200 bg-white text-[11px] font-mono text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-200 disabled:opacity-60"
-                          />
-                        </label>
+              /* ── INDIVIDUAL ROW MODE ── */
+              <div className="space-y-2.5">
+                {targetRows.map((t) => {
+                  const k = draftKey(t);
+                  const row = rowsLookup.get(rowKey(t.groupCode, t.parameter));
+                  const currentVal = row ? (row[t.fieldName as keyof typeof row] as string | undefined) ?? "—" : "—";
+                  const fieldLabel = TARGET_FIELD_LABEL[t.fieldName];
+                  return (
+                    <div key={k} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 space-y-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-slate-700 bg-white border border-slate-200 px-1.5 py-0.5 rounded font-mono">{t.groupCode}</span>
+                        <span className="text-[11px] font-semibold text-slate-800">{t.parameter}</span>
+                        {/* show all sibling groupCodes if multiple rows share same parameter */}
+                        {row?.uom && t.fieldName !== "uom" && <span className="text-[10px] text-slate-400 font-mono">({row.uom})</span>}
+                        <span className={`text-[9px] font-bold uppercase tracking-[0.12em] px-1.5 py-0.5 rounded border ${
+                          t.fieldName === "results"      ? "bg-blue-50 text-blue-700 border-blue-200"   :
+                          t.fieldName === "uom"          ? "bg-purple-50 text-purple-700 border-purple-200" :
+                          t.fieldName === "loq"          ? "bg-orange-50 text-orange-700 border-orange-200" :
+                          t.fieldName === "method"       ? "bg-teal-50 text-teal-700 border-teal-200"   :
+                                                           "bg-slate-100 text-slate-600 border-slate-200"
+                        }`}>
+                          {fieldLabel}
+                        </span>
                       </div>
-                    );
-                  })}
-                </div>
+                      <div className="flex items-center gap-2 text-[10px]">
+                        <span className="text-slate-400 w-16 shrink-0">Current</span>
+                        <span className="font-mono text-slate-700">{currentVal}</span>
+                      </div>
+                      {row?.requirements && t.fieldName !== "requirements" && (
+                        <div className="flex items-center gap-2 text-[10px]">
+                          <span className="text-slate-400 w-16 shrink-0">Spec</span>
+                          <span className="font-mono text-slate-700">{row.requirements}</span>
+                        </div>
+                      )}
+                      <label className="flex items-center gap-2 text-[10px] text-slate-500">
+                        <span className="w-16 shrink-0 font-semibold">New {fieldLabel}</span>
+                        <input
+                          type="text"
+                          value={drafts[k] ?? ""}
+                          onChange={(e) => setDrafts((p) => ({ ...p, [k]: e.target.value }))}
+                          placeholder={t.suggestedValue ?? `Enter corrected ${fieldLabel.toLowerCase()}`}
+                          disabled={saving}
+                          className="flex-1 px-2 py-1 rounded border border-slate-200 bg-white text-[11px] font-mono text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-200 disabled:opacity-60"
+                        />
+                      </label>
+                    </div>
+                  );
+                })}
+              </div>
               )}
 
               {saveError && <p className="text-[11px] text-red-600">{saveError}</p>}
@@ -636,7 +681,7 @@ interface ApprovalPanelProps {
   record: CoaApprovalRecord | null;
   submitting: boolean;
   onApprove: (notes?: string) => void;
-  onReject: (notes?: string) => void;
+  onReject:  (notes?: string) => void;
 }
 
 function ApprovalPanel({
@@ -654,48 +699,15 @@ function ApprovalPanel({
   const openDialog = (type: "approve" | "reject") => { setNotes(""); setDialog(type); };
   const closeDialog = () => { if (submitting) return; setDialog(null); setNotes(""); };
   const handleConfirm = () => {
-    if (isApproveDialog) {
-      // Send approval result back to the originating app
-      if (window.opener && typeof window.opener.postMessage === 'function') {
-        window.opener.postMessage({
-          type: 'reviewResult',
-          status: 'Approved',
-          notes: notes.trim() || undefined
-        }, '*');
-      }
-      onApprove(notes.trim() || undefined);
-    } else {
-      // Send rejection result back to the originating app
-      if (window.opener && typeof window.opener.postMessage === 'function') {
-        window.opener.postMessage({
-          type: 'reviewResult',
-          status: 'Rejected',
-          notes: notes.trim() || undefined
-        }, '*');
-      }
-      onReject(notes.trim() || undefined);
-    }
+    if (isApproveDialog) onApprove(notes.trim() || undefined);
+    else onReject(notes.trim() || undefined);
   };
 
-  // Auto-close dialog and attempt to close the tab/window when submission completes
+  // Auto-close dialog when submission completes
   useEffect(() => {
-    if (prevSubmitting.current && !submitting) {
-      if (typeof window !== 'undefined') {
-        // Standard close (works if the window was opened via script)
-        try { window.close(); } catch (e) { /* ignore */ }
-        // Fallback self-close
-        try {
-          const self = window.open('', '_self');
-          if (self) self.close();
-        } catch (e) { /* ignore */ }
-        // Final fallback: navigate to a blank page
-        try { window.location.href = 'about:blank'; } catch (e) { /* ignore */ }
-      }
-    }
+    if (prevSubmitting.current && !submitting) { setDialog(null); setNotes(""); }
     prevSubmitting.current = submitting;
   }, [submitting]);
-
-
 
   return (
     <>
@@ -713,8 +725,8 @@ function ApprovalPanel({
           {record && (
             <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border ${sm.bgClass} ${sm.borderClass}`}>
               {currentStatus === "Approved" && <ShieldCheck size={13} className={sm.colorClass} />}
-              {currentStatus === "Rejected" && <ShieldX size={13} className={sm.colorClass} />}
-              {currentStatus === "Pending" && <Clock size={13} className={sm.colorClass} />}
+              {currentStatus === "Rejected" && <ShieldX    size={13} className={sm.colorClass} />}
+              {currentStatus === "Pending"  && <Clock      size={13} className={sm.colorClass} />}
               <div className="flex-1 min-w-0">
                 <p className={`text-[11px] font-bold ${sm.colorClass}`}>{sm.label}</p>
                 {record.reviewedBy && (
@@ -726,11 +738,21 @@ function ApprovalPanel({
 
           {/* Readiness info */}
           {unresolvedBlocks > 0 ? (
-            <div className="flex items-start gap-2 bg-red-50 border border-red-100 rounded-xl px-3 py-2.5">
-              <XCircle size={12} className="text-red-500 shrink-0 mt-0.5" />
-              <p className="text-[11px] text-red-700 leading-relaxed">
-                <strong>{unresolvedBlocks} blocking error{unresolvedBlocks !== 1 ? "s" : ""}</strong> must be resolved before approving.
-              </p>
+            <div className="space-y-2">
+              <div className="flex items-start gap-2 bg-red-50 border border-red-100 rounded-xl px-3 py-2.5">
+                <XCircle size={12} className="text-red-500 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-red-700 leading-relaxed">
+                  <strong>{unresolvedBlocks} blocking error{unresolvedBlocks !== 1 ? "s" : ""}</strong> must be resolved before approving.
+                </p>
+              </div>
+              {/* Two-person sign-off requirement (L1-M11 Rule 11.6) */}
+              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+                <span className="text-red-500 text-[13px] shrink-0 mt-px">👥</span>
+                <div>
+                  <p className="text-[11px] font-bold text-red-700">Two-person sign-off required</p>
+                  <p className="text-[10px] text-red-600 mt-px leading-relaxed">OOS report — both Approver and QA signatory must be present (L1-M11 Rule 11.6).</p>
+                </div>
+              </div>
             </div>
           ) : pendingCount > 0 ? (
             <div className="flex items-start gap-2 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2.5">
@@ -751,10 +773,11 @@ function ApprovalPanel({
             <button
               onClick={() => openDialog("approve")}
               disabled={!canApprove || submitting}
-              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-[12px] font-bold border transition-all ${canApprove && !submitting
+              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-[12px] font-bold border transition-all ${
+                canApprove && !submitting
                   ? "bg-green-600 hover:bg-green-700 text-white border-green-600"
                   : "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
-                }`}
+              }`}
             >
               <ShieldCheck size={13} />Approve Report
             </button>
@@ -784,7 +807,7 @@ function ApprovalPanel({
               <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${isApproveDialog ? "bg-green-100 border border-green-200" : "bg-red-100 border border-red-200"}`}>
                 {isApproveDialog
                   ? <ShieldCheck size={16} className="text-green-600" />
-                  : <ShieldX size={16} className="text-red-600" />}
+                  : <ShieldX     size={16} className="text-red-600" />}
               </div>
               <div>
                 <p className="text-sm font-bold text-slate-900">
@@ -818,10 +841,11 @@ function ApprovalPanel({
                 rows={3}
                 disabled={submitting}
                 autoFocus
-                className={`w-full px-2.5 py-2 rounded-lg border bg-white text-[11px] text-slate-800 placeholder:text-slate-300 focus:outline-none resize-none disabled:opacity-60 transition-colors ${isApproveDialog
+                className={`w-full px-2.5 py-2 rounded-lg border bg-white text-[11px] text-slate-800 placeholder:text-slate-300 focus:outline-none resize-none disabled:opacity-60 transition-colors ${
+                  isApproveDialog
                     ? "border-green-200 focus:border-green-500 focus:ring-1 focus:ring-green-100"
                     : "border-red-200 focus:border-red-500 focus:ring-1 focus:ring-red-100"
-                  }`}
+                }`}
               />
             </div>
 
@@ -830,14 +854,15 @@ function ApprovalPanel({
               <button
                 onClick={handleConfirm}
                 disabled={submitting}
-                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-[12px] font-bold text-white transition-colors disabled:opacity-70 ${isApproveDialog ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700"
-                  }`}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-[12px] font-bold text-white transition-colors disabled:opacity-70 ${
+                  isApproveDialog ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700"
+                }`}
               >
                 {submitting
                   ? <><Loader2 size={13} className="animate-spin" />Processing…</>
                   : isApproveDialog
                     ? <><ShieldCheck size={13} />Confirm Approve</>
-                    : <><ShieldX size={13} />Confirm Reject</>}
+                    : <><ShieldX     size={13} />Confirm Reject</>}
               </button>
               <button
                 onClick={closeDialog}
@@ -864,24 +889,24 @@ interface AuditLogDrawerProps {
 }
 
 function buildAuditMessage(log: AuditLogEntry): string {
-  const field = log.fieldName ?? "field";
-  const oldVal = log.oldValue ?? null;
-  const newVal = log.newValue ?? null;
+  const field  = log.fieldName ?? "field";
+  const oldVal = log.oldValue  ?? null;
+  const newVal = log.newValue  ?? null;
 
   if (log.actionType === "StatusChange") {
     if (oldVal && newVal) return `Status changed from ${oldVal} to ${newVal}`;
-    if (newVal) return `Status set to ${newVal}`;
+    if (newVal)           return `Status set to ${newVal}`;
     return "Status updated";
   }
   if (log.actionType === "HeaderUpdate") {
     if (oldVal && newVal) return `${field} changed from "${oldVal}" to "${newVal}"`;
-    if (newVal) return `${field} set to "${newVal}"`;
+    if (newVal)           return `${field} set to "${newVal}"`;
     return `${field} updated`;
   }
   // DetailUpdate
   if (oldVal && newVal) return `${field} changed from "${oldVal}" to "${newVal}"`;
-  if (newVal) return `${field} set to "${newVal}"`;
-  if (oldVal) return `${field} cleared (was "${oldVal}")`;
+  if (newVal)           return `${field} set to "${newVal}"`;
+  if (oldVal)           return `${field} cleared (was "${oldVal}")`;
   return `${field} updated`;
 }
 
@@ -975,15 +1000,15 @@ function AuditLogDrawer({ regNo, onClose }: AuditLogDrawerProps) {
 
                 <div className="space-y-3">
                   {logs.map((log, idx) => {
-                    const badge = AUDIT_BADGE[log.actionType] ?? "text-slate-500 bg-slate-100";
-                    const label = AUDIT_LABEL[log.actionType] ?? log.actionType;
+                    const badge   = AUDIT_BADGE[log.actionType] ?? "text-slate-500 bg-slate-100";
+                    const label   = AUDIT_LABEL[log.actionType] ?? log.actionType;
                     const message = buildAuditMessage(log);
                     const context = [log.groupCode, log.parameter].filter(Boolean).join(" / ");
                     const dotColor =
                       log.actionType === "DetailUpdate" ? "bg-blue-600 ring-blue-100" :
-                        log.actionType === "HeaderUpdate" ? "bg-violet-600 ring-violet-100" :
-                          log.actionType === "StatusChange" ? "bg-amber-600 ring-amber-100" :
-                            "bg-slate-400 ring-slate-100";
+                      log.actionType === "HeaderUpdate" ? "bg-violet-600 ring-violet-100" :
+                      log.actionType === "StatusChange" ? "bg-amber-600 ring-amber-100" :
+                      "bg-slate-400 ring-slate-100";
 
                     return (
                       <div key={log.id} className="relative flex items-start gap-3">
@@ -1053,8 +1078,8 @@ function SidebarSection({ title, children, defaultOpen = true }: { title: string
 // Page
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PANEL_MIN = 320;
-const PANEL_MAX = 720;
+const PANEL_MIN     = 320;
+const PANEL_MAX     = 720;
 const PANEL_DEFAULT = 420;
 const PANEL_STORAGE_KEY = "docreview.aiPanelWidth";
 
@@ -1076,15 +1101,15 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
 
   const clientName = bundle.rows[0]?.issuedToClientName ?? null;
 
-  const [filter, setFilter] = useState<"all" | IssueAction | IssueSeverity>("all");
+  const [filter, setFilter]         = useState<"all" | IssueAction | IssueSeverity>("all");
   const [headFilter, setHeadFilter] = useState<"all" | HeadCode>("all");
   const [issueActions, setIssueActions] = useState<Record<string, IssueAction>>({});
 
   // Approval state
-  const [approvalRecord, setApprovalRecord] = useState<CoaApprovalRecord | null>(null);
+  const [approvalRecord, setApprovalRecord]   = useState<CoaApprovalRecord | null>(null);
   const [approvalLoading, setApprovalLoading] = useState(true);
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
-  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [approvalError, setApprovalError]     = useState<string | null>(null);
 
   // Audit log drawer
   const [auditOpen, setAuditOpen] = useState(false);
@@ -1099,7 +1124,6 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
       .finally(() => { if (!cancelled) setApprovalLoading(false); });
     return () => { cancelled = true; };
   }, [regNo]);
-  const navigate = useNavigate();
 
   // Panel resize
   const [panelWidth, setPanelWidth] = useState<number>(() => {
@@ -1141,45 +1165,45 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
   }, []);
 
   const onHandleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "ArrowLeft") { e.preventDefault(); setPanelWidth((w) => Math.min(PANEL_MAX, w + 24)); }
+    if (e.key === "ArrowLeft")       { e.preventDefault(); setPanelWidth((w) => Math.min(PANEL_MAX, w + 24)); }
     else if (e.key === "ArrowRight") { e.preventDefault(); setPanelWidth((w) => Math.max(PANEL_MIN, w - 24)); }
-    else if (e.key === "Home") { e.preventDefault(); setPanelWidth(PANEL_DEFAULT); }
+    else if (e.key === "Home")       { e.preventDefault(); setPanelWidth(PANEL_DEFAULT); }
   }, []);
 
   // Single-doc result
-  const doc = result.documents[0];
+  const doc     = result.documents[0];
   const docMeta = metadata?.[0];
 
-  const errors = doc?.issues.filter((i) => i.severity === "error" && (issueActions[i.id] ?? "pending") === "pending") ?? [];
-  const warnings = doc?.issues.filter((i) => i.severity === "warning" && (issueActions[i.id] ?? "pending") === "pending") ?? [];
+  const errors      = doc?.issues.filter((i) => i.severity === "error"      && (issueActions[i.id] ?? "pending") === "pending") ?? [];
+  const warnings    = doc?.issues.filter((i) => i.severity === "warning"    && (issueActions[i.id] ?? "pending") === "pending") ?? [];
   const suggestions = doc?.issues.filter((i) => i.severity === "suggestion" && (issueActions[i.id] ?? "pending") === "pending") ?? [];
 
-  const pendingCount = doc?.issues.filter((i) => (issueActions[i.id] ?? "pending") === "pending").length ?? 0;
+  const pendingCount  = doc?.issues.filter((i) => (issueActions[i.id] ?? "pending") === "pending").length ?? 0;
   const modifiedCount = doc?.issues.filter((i) => issueActions[i.id] === "modified").length ?? 0;
-  const ignoredCount = doc?.issues.filter((i) => issueActions[i.id] === "ignored").length ?? 0;
+  const ignoredCount  = doc?.issues.filter((i) => issueActions[i.id] === "ignored").length ?? 0;
 
   const unresolvedBlocks = errors.filter((i) => (issueActions[i.id] ?? "pending") === "pending").length;
-  const canApprove = unresolvedBlocks === 0 && pendingCount === 0 && !!doc;
+  const canApprove       = unresolvedBlocks === 0 && pendingCount === 0 && !!doc;
 
   const getAction = (id: string): IssueAction => issueActions[id] ?? "pending";
   const setAction = (id: string, action: IssueAction) => setIssueActions((prev) => ({ ...prev, [id]: action }));
 
   const headCounts = HEADS.map((h) => ({
     head: h,
-    count: doc?.issues.filter((i) => i.headCode === h.code && (issueActions[i.id] ?? "pending") === "pending").length ?? 0,
+    count:  doc?.issues.filter((i) => i.headCode === h.code && (issueActions[i.id] ?? "pending") === "pending").length ?? 0,
     errors: doc?.issues.filter((i) => i.headCode === h.code && i.severity === "error" && (issueActions[i.id] ?? "pending") === "pending").length ?? 0,
   }));
   const uncategorisedCount = doc?.issues.filter((i) => !i.headCode && (issueActions[i.id] ?? "pending") === "pending").length ?? 0;
 
   const filtered = (doc?.issues ?? []).filter((i) => {
     if (headFilter !== "all" && i.headCode !== headFilter) return false;
-    if (filter === "all") return true;
-    if (filter === "error") return i.severity === "error";
-    if (filter === "warning") return i.severity === "warning";
+    if (filter === "all")        return true;
+    if (filter === "error")      return i.severity === "error";
+    if (filter === "warning")    return i.severity === "warning";
     if (filter === "suggestion") return i.severity === "suggestion";
-    if (filter === "pending") return getAction(i.id) === "pending";
-    if (filter === "modified") return getAction(i.id) === "modified";
-    if (filter === "ignored") return getAction(i.id) === "ignored";
+    if (filter === "pending")    return getAction(i.id) === "pending";
+    if (filter === "modified")   return getAction(i.id) === "modified";
+    if (filter === "ignored")    return getAction(i.id) === "ignored";
     return true;
   });
 
@@ -1229,22 +1253,17 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
   );
 
   // ── Approval helpers ──────────────────────────────────────────────────────
-  const submitApproval = async (status: "Approved" | "Rejected", notes?: string) => {
+ const submitApproval = async (status: "Approved" | "Rejected", notes?: string) => {
   setApprovalSubmitting(true);
   setApprovalError(null);
   try {
     const updated = await setApproval({ regNo, status, reviewedBy: REVIEWER_NAME, notes });
     setApprovalRecord(updated);
 
-    // Notify the opener tab
-    if (window.opener && typeof window.opener.postMessage === 'function') {
-      window.opener.postMessage({ type: 'reviewResult', status, notes }, '*');
-      try { window.opener.focus(); } catch (e) {}
-    }
-
-    // This works because the tab was opened via window.open() from senior's app
+    // Close this tab — it was opened via window.open() from the parent list page.
+    // window.close() only works on windows/tabs that were opened by script,
+    // which matches your window.open(...) usage.
     window.close();
-
   } catch (e) {
     setApprovalError(e instanceof Error ? e.message : "Failed to save decision.");
   } finally {
@@ -1253,7 +1272,7 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
 };
 
   const handleApprove = (notes?: string) => submitApproval("Approved", notes);
-  const handleReject = (notes?: string) => submitApproval("Rejected", notes);
+  const handleReject  = (notes?: string) => submitApproval("Rejected",  notes);
 
   // Nav status badge derived from approval record
   const navSm = statusMeta(approvalRecord?.status as ApprovalStatus | undefined);
@@ -1304,7 +1323,7 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
             {!approvalLoading && (
               <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full border inline-flex items-center gap-1.5 ${navSm.bgClass} ${navSm.borderClass} ${navSm.colorClass}`}>
                 {approvalRecord?.status === "Approved" && <ShieldCheck size={10} />}
-                {approvalRecord?.status === "Rejected" && <ShieldX size={10} />}
+                {approvalRecord?.status === "Rejected" && <ShieldX     size={10} />}
                 {(!approvalRecord || approvalRecord.status === "Pending") && <Clock size={10} />}
                 {approvalRecord?.status ?? "Pending"}
               </span>
@@ -1402,12 +1421,13 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
                       <p className="text-[8px] font-bold uppercase tracking-[0.2em] text-slate-400 mb-0.5">Registration No.</p>
                       <p className="text-sm font-black text-slate-900 font-mono leading-tight break-all">{regNo}</p>
                     </div>
-                    <div className={`shrink-0 px-2 py-1 rounded-md text-[9px] font-bold uppercase tracking-[0.1em] border ${unresolvedBlocks > 0
+                    <div className={`shrink-0 px-2 py-1 rounded-md text-[9px] font-bold uppercase tracking-[0.1em] border ${
+                      unresolvedBlocks > 0
                         ? "bg-red-50 text-red-600 border-red-200"
                         : canApprove
-                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                          : "bg-amber-50 text-amber-700 border-amber-200"
-                      }`}>
+                        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        : "bg-amber-50 text-amber-700 border-amber-200"
+                    }`}>
                       {unresolvedBlocks > 0 ? "Blocked" : canApprove ? "Ready" : "In Review"}
                     </div>
                   </div>
@@ -1472,8 +1492,8 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
                     <div>
                       <div className="flex gap-0.5 h-1.5 rounded-full overflow-hidden mb-1">
                         {modifiedCount > 0 && <div className="bg-blue-500 rounded-full transition-all" style={{ flex: modifiedCount }} />}
-                        {ignoredCount > 0 && <div className="bg-slate-300 rounded-full transition-all" style={{ flex: ignoredCount }} />}
-                        {pendingCount > 0 && <div className="bg-slate-100 rounded-full border border-slate-200 transition-all" style={{ flex: pendingCount }} />}
+                        {ignoredCount  > 0 && <div className="bg-slate-300 rounded-full transition-all" style={{ flex: ignoredCount  }} />}
+                        {pendingCount  > 0 && <div className="bg-slate-100 rounded-full border border-slate-200 transition-all" style={{ flex: pendingCount  }} />}
                       </div>
                       <p className="text-[9px] text-slate-400 font-mono">{doc.issues.length - pendingCount}/{doc.issues.length} actioned</p>
                     </div>
@@ -1493,10 +1513,11 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
               <div className="space-y-0.5 px-1">
                 <button
                   onClick={() => setHeadFilter("all")}
-                  className={`w-full text-left rounded-md px-2.5 py-1.5 transition-all duration-150 flex items-center justify-between gap-2 ${headFilter === "all"
+                  className={`w-full text-left rounded-md px-2.5 py-1.5 transition-all duration-150 flex items-center justify-between gap-2 ${
+                    headFilter === "all"
                       ? "bg-slate-900 text-white"
                       : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                    }`}
+                  }`}
                 >
                   <span className="text-[10px] font-semibold font-mono flex items-center gap-2">
                     <span className={`text-[8px] ${headFilter === "all" ? "text-emerald-400" : "text-slate-400"}`}>▶</span>
@@ -1508,27 +1529,29 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
                 </button>
                 {headCounts.map(({ head, count, errors: hErrs }) => {
                   const active = headFilter === head.code;
-                  const empty = count === 0;
+                  const empty  = count === 0;
                   return (
                     <button
                       key={head.code}
                       onClick={() => !empty && setHeadFilter(active ? "all" : head.code)}
                       disabled={empty}
                       title={head.description}
-                      className={`w-full text-left rounded-md px-2.5 py-1.5 transition-all duration-150 flex items-center justify-between gap-2 ${active ? "bg-slate-900 text-white"
-                          : empty ? "text-slate-300 cursor-not-allowed"
-                            : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                        }`}
+                      className={`w-full text-left rounded-md px-2.5 py-1.5 transition-all duration-150 flex items-center justify-between gap-2 ${
+                        active  ? "bg-slate-900 text-white"
+                        : empty ? "text-slate-300 cursor-not-allowed"
+                                : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                      }`}
                     >
                       <span className="text-[10px] font-semibold font-mono flex items-center gap-2 truncate">
                         <span className={`text-[8px] ${active ? "text-emerald-400" : "text-slate-400"}`}>▶</span>
                         <span className="truncate">{head.code}</span>
                       </span>
-                      <span className={`text-[9px] font-bold tabular-nums px-1.5 py-0.5 rounded shrink-0 ${active ? "bg-white/15 text-white"
-                          : hErrs > 0 ? "bg-red-100 text-red-700"
-                            : empty ? "bg-slate-50 text-slate-300"
-                              : "bg-slate-100 text-slate-600"
-                        }`}>{count}</span>
+                      <span className={`text-[9px] font-bold tabular-nums px-1.5 py-0.5 rounded shrink-0 ${
+                        active  ? "bg-white/15 text-white"
+                        : hErrs > 0 ? "bg-red-100 text-red-700"
+                        : empty ? "bg-slate-50 text-slate-300"
+                                : "bg-slate-100 text-slate-600"
+                      }`}>{count}</span>
                     </button>
                   );
                 })}
@@ -1573,14 +1596,14 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 px-5 py-4 text-xs">
                     {([
-                      ["Report No.", header.reportNo],
-                      ["Customer", clientName],
-                      ["Customer Ref.", header.customerRef],
-                      ["Kind Atten.", header.kindAttention],
-                      ["Sample Received", header.sampleReceivedDate],
+                      ["Report No.",        header.reportNo],
+                      ["Customer",          clientName],
+                      ["Customer Ref.",     header.customerRef],
+                      ["Kind Atten.",       header.kindAttention],
+                      ["Sample Received",   header.sampleReceivedDate],
                       ["Sample Registered", header.sampleRegistrationDate],
-                      ["Sample Type", header.sampleType],
-                      ["Batch No.", header.batchNo],
+                      ["Sample Type",       header.sampleType],
+                      ["Batch No.",         header.batchNo],
                     ] as [string, string | null | undefined][])
                       .filter(([, v]) => v != null && String(v).trim() !== "")
                       .map(([k, v]) => (
@@ -1684,10 +1707,10 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
               {(() => {
                 const totalPending = errors.length + warnings.length + suggestions.length;
                 return [
-                  { sev: "all", label: totalPending < doc.issues.length ? `${totalPending} pending / ${doc.issues.length}` : `All · ${doc.issues.length}`, style: filter === "all" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-slate-600 border-slate-200 hover:border-slate-400" },
-                  { sev: "error", label: `${errors.length} Error${errors.length !== 1 ? "s" : ""}`, style: filter === "error" ? "bg-red-600 text-white border-red-600" : "bg-white text-red-600 border-red-200 hover:bg-red-50" },
-                  { sev: "warning", label: `${warnings.length} Warning${warnings.length !== 1 ? "s" : ""}`, style: filter === "warning" ? "bg-amber-500 text-white border-amber-500" : "bg-white text-amber-600 border-amber-200 hover:bg-amber-50" },
-                  { sev: "suggestion", label: `${suggestions.length} Tip${suggestions.length !== 1 ? "s" : ""}`, style: filter === "suggestion" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-blue-600 border-blue-200 hover:bg-blue-50" },
+                  { sev: "all",        label: totalPending < doc.issues.length ? `${totalPending} pending / ${doc.issues.length}` : `All · ${doc.issues.length}`, style: filter === "all" ? "bg-blue-600 text-white border-blue-600" : "bg-white text-slate-600 border-slate-200 hover:border-slate-400" },
+                  { sev: "error",      label: `${errors.length} Error${errors.length !== 1 ? "s" : ""}`,         style: filter === "error"      ? "bg-red-600 text-white border-red-600"     : "bg-white text-red-600 border-red-200 hover:bg-red-50" },
+                  { sev: "warning",    label: `${warnings.length} Warning${warnings.length !== 1 ? "s" : ""}`,   style: filter === "warning"    ? "bg-amber-500 text-white border-amber-500" : "bg-white text-amber-600 border-amber-200 hover:bg-amber-50" },
+                  { sev: "suggestion", label: `${suggestions.length} Tip${suggestions.length !== 1 ? "s" : ""}`, style: filter === "suggestion" ? "bg-blue-600 text-white border-blue-600"   : "bg-white text-blue-600 border-blue-200 hover:bg-blue-50" },
                 ].map(({ sev, label, style }) => (
                   <button key={sev} onClick={() => setFilter(sev as typeof filter)} className={`text-[10px] font-bold px-2.5 py-1 rounded border transition-all duration-150 ${style}`}>{label}</button>
                 ));
@@ -1699,33 +1722,51 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
             {/* Metadata block */}
             {docMeta && (() => {
               const metaFields: [string, string | null | undefined][] = [
-                ["Report No.", docMeta.reportNo],
-                ["ULR", docMeta.ulr],
-                ["Customer", docMeta.customer],
-                ["Sample", docMeta.sample],
+                ["Report No.",      docMeta.reportNo],
+                ["ULR",             docMeta.ulr],
+                ["Customer",        docMeta.customer],
+                ["Sample",          docMeta.sample],
                 ["Sample / Lot ID", docMeta.sampleId],
-                ["Matrix", docMeta.matrix],
-                ["Sub-labs", docMeta.subLabs],
-                ["Method", docMeta.method],
-                ["Doc Class", docMeta.documentClass ?? docMeta.version],
-                ["NABL No.", docMeta.nabl],
-                ["Issued", docMeta.issuedDate],
-                ["Sampling", docMeta.samplingDate],
-                ["Receipt", docMeta.receiptDate],
-                ["Analysis Start", docMeta.analysisStartDate],
-                ["Analysis End", docMeta.analysisEndDate],
+                ["Matrix",          docMeta.matrix],
+                ["Sub-labs",        docMeta.subLabs],
+                ["Method",          docMeta.method],
+                ["Doc Class",       docMeta.documentClass],
+                ["Version",         docMeta.version],
+                ["NABL No.",        docMeta.nabl],
+                ["Issued",          docMeta.issuedDate],
+                ["Sampling",        docMeta.samplingDate],
+                ["Receipt",         docMeta.receiptDate],
+                ["Analysis Start",  docMeta.analysisStartDate],
+                ["Analysis End",    docMeta.analysisEndDate],
               ].filter(([, v]) => v != null && v !== "") as [string, string][];
               if (metaFields.length === 0) return null;
+
+              const isAmendment =
+                docMeta.version != null &&
+                (docMeta.version.match(/v[2-9]/i) || docMeta.version.toLowerCase().includes("amend") || docMeta.version.toLowerCase().includes("reanalys"));
+
               return (
                 <div className="px-5 pt-4 pb-4 border-b border-slate-100">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.16em] mb-2.5 flex items-center gap-1.5">
                     <span className="w-1 h-1 rounded-full bg-slate-400" />Report Metadata
                   </p>
+
+                  {/* Amendment banner (NABL §7.8.8) */}
+                  {isAmendment && (
+                    <div className="mb-2.5 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      <span className="text-amber-500 text-[13px] shrink-0 mt-px">△</span>
+                      <div>
+                        <p className="text-[11px] font-bold text-amber-700">Amendment report — {docMeta.version}</p>
+                        <p className="text-[10px] text-amber-600 leading-relaxed">NABL §7.8.8: verify new ULR issued, reason documented, changes traceable, and prior report identified.</p>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="rounded-xl border border-slate-200 overflow-hidden">
                     {metaFields.map(([k, v], i) => (
                       <div key={k} className={`flex items-start gap-2 px-3 py-2 ${i % 2 === 0 ? "bg-white" : "bg-slate-50"} ${i !== 0 ? "border-t border-slate-100" : ""}`}>
                         <span className="text-[9.5px] font-semibold text-slate-400 uppercase tracking-[0.08em] w-24 shrink-0 pt-px">{k}</span>
-                        <span className="text-[11px] text-slate-800 font-medium leading-snug break-all">{v}</span>
+                        <span className={`text-[11px] font-medium leading-snug break-all ${k === "Version" && isAmendment ? "text-amber-700 font-bold" : "text-slate-800"}`}>{v}</span>
                       </div>
                     ))}
                   </div>
@@ -1746,9 +1787,9 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
               {doc.issues.length > 0 && (
                 <div className="mb-3">
                   <div className="flex gap-1 h-1.5 rounded-full overflow-hidden">
-                    {pendingCount > 0 && <div className="bg-slate-300 rounded-full" style={{ flex: pendingCount }} />}
-                    {modifiedCount > 0 && <div className="bg-blue-500 rounded-full" style={{ flex: modifiedCount }} />}
-                    {ignoredCount > 0 && <div className="bg-slate-400 rounded-full" style={{ flex: ignoredCount }} />}
+                    {pendingCount  > 0 && <div className="bg-slate-300 rounded-full" style={{ flex: pendingCount  }} />}
+                    {modifiedCount > 0 && <div className="bg-blue-500 rounded-full"  style={{ flex: modifiedCount }} />}
+                    {ignoredCount  > 0 && <div className="bg-slate-400 rounded-full" style={{ flex: ignoredCount  }} />}
                   </div>
                   <p className="text-[9px] text-slate-400 mt-1">{doc.issues.length - pendingCount} of {doc.issues.length} actioned</p>
                 </div>
@@ -1757,6 +1798,37 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
               {doc.summary && (
                 <p className="text-slate-600 text-xs leading-relaxed border-l-2 border-slate-200 pl-3 italic">{doc.summary}</p>
               )}
+
+              {/* ── Remark type classification (L1-M10) ── */}
+              {(() => {
+                const remark = deriveRemarkType(doc.issues);
+                return (
+                  <div className={`mt-3 flex items-start gap-2 px-3 py-2.5 rounded-lg border-l-[3px] border border-slate-200 ${remark.leftBorder} ${remark.bg}`}>
+                    <span className={`text-[10px] font-bold uppercase tracking-[0.12em] shrink-0 mt-px ${remark.textClass}`}>Type {remark.type}</span>
+                    <div>
+                      <p className={`text-[11px] font-semibold ${remark.textClass}`}>{remark.label}</p>
+                      <p className="text-[10px] text-slate-500 leading-relaxed">{remark.description}</p>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* ── Auto-attach comment triggers (L1-M10) ── */}
+              {(() => {
+                const tags = deriveAutoAttach(doc.issues);
+                if (!tags.length) return null;
+                return (
+                  <div className="mt-3 space-y-1.5">
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-[0.14em]">Auto-attach notes</p>
+                    {tags.map((t, i) => (
+                      <div key={i} className={`flex items-start gap-2 px-3 py-2 rounded-lg text-[11px] ${t.severity === "warning" ? "bg-amber-50 border border-amber-200 text-amber-700" : "bg-blue-50 border border-blue-100 text-blue-700"}`}>
+                        <span className="shrink-0 text-[12px]" aria-hidden="true">{t.icon}</span>
+                        <span className="leading-relaxed">{t.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* ── Approval Panel ─────────────────────────────────────────── */}
@@ -1779,11 +1851,11 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
                 // Check if there are actioned items of this type (resolved) or truly none
                 const allIssues = doc?.issues ?? [];
                 const hasResolvedOfType =
-                  filter === "all" ? allIssues.some((i) => (issueActions[i.id] ?? "pending") !== "pending") :
-                    filter === "error" ? allIssues.some((i) => i.severity === "error" && (issueActions[i.id] ?? "pending") !== "pending") :
-                      filter === "warning" ? allIssues.some((i) => i.severity === "warning" && (issueActions[i.id] ?? "pending") !== "pending") :
-                        filter === "suggestion" ? allIssues.some((i) => i.severity === "suggestion" && (issueActions[i.id] ?? "pending") !== "pending") :
-                          false;
+                  filter === "all"        ? allIssues.some((i) => (issueActions[i.id] ?? "pending") !== "pending") :
+                  filter === "error"      ? allIssues.some((i) => i.severity === "error"      && (issueActions[i.id] ?? "pending") !== "pending") :
+                  filter === "warning"    ? allIssues.some((i) => i.severity === "warning"    && (issueActions[i.id] ?? "pending") !== "pending") :
+                  filter === "suggestion" ? allIssues.some((i) => i.severity === "suggestion" && (issueActions[i.id] ?? "pending") !== "pending") :
+                  false;
                 return (
                   <div className="flex flex-col items-center justify-center py-16 text-center">
                     <div className={`w-14 h-14 rounded-2xl border flex items-center justify-center mb-3 ${hasResolvedOfType ? "bg-green-50 border-green-200" : "bg-slate-100 border-slate-200"}`}>
@@ -1792,7 +1864,7 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
                     <p className="text-slate-700 font-semibold text-sm">
                       {hasResolvedOfType
                         ? filter === "all" ? "All findings resolved" : `All ${filter}s resolved`
-                        : filter === "all" ? "No issues found" : `No ${filter} items`}
+                        : filter === "all" ? "No issues found"       : `No ${filter} items`}
                     </p>
                     <p className="text-slate-400 text-xs mt-1">
                       {hasResolvedOfType ? "Every item in this category has been actioned." : "This report is clean in this category."}
@@ -1823,3 +1895,5 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
     </div>
   );
 }
+
+// i m last

@@ -38,6 +38,46 @@ interface Props {
 // Per-issue action state
 type IssueAction = "pending" | "accepted" | "modified" | "rejected";
 
+// ─── Remark type classification (L1-M10) ─────────────────────────────────────
+const REMARK_TYPES = [
+  { type: "A", label: "Compliant",     leftBorder: "border-l-emerald-500", bg: "bg-emerald-50/40", textClass: "text-emerald-700", description: "All parameters within specification" },
+  { type: "B", label: "With caveat",   leftBorder: "border-l-amber-400",   bg: "bg-amber-50/40",   textClass: "text-amber-700",   description: "Complies subject to stated condition or scope limitation" },
+  { type: "C", label: "Non-compliant", leftBorder: "border-l-red-500",     bg: "bg-red-50/40",     textClass: "text-red-700",     description: "One or more parameters failed specification" },
+  { type: "D", label: "MU disclosed",  leftBorder: "border-l-blue-400",    bg: "bg-blue-50/40",    textClass: "text-blue-700",    description: "Measurement Uncertainty declared; decision rule applied per NABL-164" },
+  { type: "E", label: "Out of scope",  leftBorder: "border-l-slate-400",   bg: "bg-slate-50",      textClass: "text-slate-600",   description: "Parameter not in NABL accreditation scope — marked with asterisk" },
+] as const;
+
+function deriveRemarkType(issues: Array<{ severity: string; headCode?: string }>) {
+  if (!issues.length) return REMARK_TYPES[0];
+  const hasBlock = issues.some((i) => i.severity === "error");
+  const hasMU    = issues.some((i) => i.severity === "warning" && (i.headCode === "PARAMS" || i.headCode === "REGULATORY"));
+  const hasScope = issues.some((i) => i.headCode === "REGULATORY" && i.severity === "suggestion");
+  if (hasBlock)       return REMARK_TYPES[2]; // C
+  if (hasMU)          return REMARK_TYPES[3]; // D
+  if (hasScope)       return REMARK_TYPES[4]; // E
+  if (issues.length)  return REMARK_TYPES[1]; // B
+  return REMARK_TYPES[0];                      // A
+}
+
+// ─── Auto-attach comment triggers (L1-M10) ───────────────────────────────────
+function deriveAutoAttach(issues: Array<{ title: string; description?: string; headCode?: string; severity: string }>) {
+  const text = issues.map((i) => `${i.title} ${i.description ?? ""}`).join(" ").toLowerCase();
+  const tags: { icon: string; text: string; severity: "warning" | "info" }[] = [];
+  if (text.includes("tin") && text.includes("loq"))
+    tags.push({ icon: "⚗", text: "Tin reported at LOQ — verify by re-test before issue.", severity: "warning" });
+  if (text.includes("methyl") && text.includes("mercury") && text.includes("total"))
+    tags.push({ icon: "🧪", text: "Methyl Mercury speciation method differs from Total Hg method.", severity: "info" });
+  if (text.includes("fssai") && (text.includes("surveillance") || text.includes("government")))
+    tags.push({ icon: "🏛", text: "FSSAI surveillance sample — chain of custody must be maintained.", severity: "warning" });
+  if (text.includes("pet") && (text.includes("migration") || text.includes("antimony") || text.includes("sb")))
+    tags.push({ icon: "🧴", text: "PET-Sb context: low Sb indicates virgin resin or Ge/Ti-catalysed PET.", severity: "info" });
+  const hasBlockIssue = issues.some((i) => i.severity === "error" && i.headCode === "PARAMS");
+  const hasConformanceMismatch = issues.some((i) => i.title.toLowerCase().includes("front") && i.title.toLowerCase().includes("conforms"));
+  if (hasBlockIssue || hasConformanceMismatch)
+    tags.push({ icon: "⛔", text: "One or more sub-lab sections show Non-Conformance — overall verdict must be updated.", severity: "warning" });
+  return tags;
+}
+
 function formatSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -138,6 +178,12 @@ function IssueCard({ issue, index, action, onAction }: IssueCardProps) {
             {issue.evidence?.rule?.code && (
               <span className="text-[9.5px] font-mono text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">
                 {issue.evidence.rule.code}
+              </span>
+            )}
+            {/* Bold-enforcement indicator (Rule 6.3 / HYGIENE formatting defect) */}
+            {issue.headCode === "HYGIENE" && (issue.title.toLowerCase().includes("bold") || issue.title.toLowerCase().includes("formatting")) && (
+              <span className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-slate-700 bg-slate-100 border border-slate-300 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                <span className="font-bold text-[10px]">B</span>fmt
               </span>
             )}
             {issue.page && (
@@ -822,7 +868,8 @@ export default function ReviewPage({ files, result, metadata, correlationId, mod
                 ["Matrix",          docMeta.matrix],
                 ["Sub-labs",        docMeta.subLabs],
                 ["Method",          docMeta.method],
-                ["Doc Class",       docMeta.documentClass ?? docMeta.version],
+                ["Doc Class",       docMeta.documentClass],
+                ["Version",         docMeta.version],
                 ["NABL No.",        docMeta.nabl],
                 ["Issued",          docMeta.issuedDate],
                 ["Sampling",        docMeta.samplingDate],
@@ -832,12 +879,30 @@ export default function ReviewPage({ files, result, metadata, correlationId, mod
               ].filter(([, v]) => v != null && v !== "") as [string, string][];
 
               if (metaFields.length === 0) return null;
+
+              // Amendment detection: version v2, v3… or contains "amendment"/"reanalysis"
+              const isAmendment =
+                docMeta.version != null &&
+                (docMeta.version.match(/v[2-9]/i) || docMeta.version.toLowerCase().includes("amend") || docMeta.version.toLowerCase().includes("reanalys"));
+
               return (
                 <div className="px-5 pt-4 pb-4 border-b border-slate-100">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.16em] mb-2.5 flex items-center gap-1.5">
                     <span className="w-1 h-1 rounded-full bg-slate-400" />
                     Report Metadata
                   </p>
+
+                  {/* Amendment banner (NABL §7.8.8 — R-AMEND rules) */}
+                  {isAmendment && (
+                    <div className="mb-2.5 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      <span className="text-amber-500 text-[13px] shrink-0 mt-px">△</span>
+                      <div>
+                        <p className="text-[11px] font-bold text-amber-700">Amendment report — {docMeta.version}</p>
+                        <p className="text-[10px] text-amber-600 leading-relaxed">NABL §7.8.8: verify new ULR issued, reason documented, changes traceable, and prior report identified.</p>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="rounded-xl border border-slate-200 overflow-hidden">
                     {metaFields.map(([k, v], i) => (
                       <div
@@ -849,7 +914,9 @@ export default function ReviewPage({ files, result, metadata, correlationId, mod
                         <span className="text-[9.5px] font-semibold text-slate-400 uppercase tracking-[0.08em] w-24 shrink-0 pt-px">
                           {k}
                         </span>
-                        <span className="text-[11px] text-slate-800 font-medium leading-snug break-all">
+                        <span className={`text-[11px] font-medium leading-snug break-all ${
+                          k === "Version" && isAmendment ? "text-amber-700 font-bold" : "text-slate-800"
+                        }`}>
                           {v}
                         </span>
                       </div>
@@ -893,13 +960,47 @@ export default function ReviewPage({ files, result, metadata, correlationId, mod
                 </p>
               )}
 
-              {/* Approval gate notice */}
+              {/* ── Remark type classification (L1-M10) ── */}
+              {(() => {
+                const remark = deriveRemarkType(doc.issues);
+                return (
+                  <div className={`mt-3 flex items-start gap-2 px-3 py-2.5 rounded-lg border-l-[3px] border border-slate-200 ${remark.leftBorder} ${remark.bg}`}>
+                    <span className={`text-[10px] font-bold uppercase tracking-[0.12em] shrink-0 mt-px ${remark.textClass}`}>Type {remark.type}</span>
+                    <div>
+                      <p className={`text-[11px] font-semibold ${remark.textClass}`}>{remark.label}</p>
+                      <p className="text-[10px] text-slate-500 leading-relaxed">{remark.description}</p>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* ── Auto-attach comment triggers (L1-M10) ── */}
+              {(() => {
+                const tags = deriveAutoAttach(doc.issues);
+                if (!tags.length) return null;
+                return (
+                  <div className="mt-3 space-y-1.5">
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-[0.14em]">Auto-attach notes</p>
+                    {tags.map((t, i) => (
+                      <div key={i} className={`flex items-start gap-2 px-3 py-2 rounded-lg text-[11px] ${t.severity === "warning" ? "bg-amber-50 border border-amber-200 text-amber-700" : "bg-blue-50 border border-blue-100 text-blue-700"}`}>
+                        <span className="shrink-0 text-[12px]" aria-hidden="true">{t.icon}</span>
+                        <span className="leading-relaxed">{t.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {/* ── Two-person sign-off gate (L1-M11 Rule 11.6) ── */}
               {unresolvedBlocks > 0 && (
                 <div className="mt-3 flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
                   <XCircle size={13} className="text-red-500 shrink-0 mt-0.5" />
-                  <p className="text-[11px] text-red-700 leading-relaxed">
-                    <strong>{unresolvedBlocks} blocking error{unresolvedBlocks !== 1 ? "s" : ""}</strong> must be resolved (Modify or Reject) before this report can be approved.
-                  </p>
+                  <div>
+                    <p className="text-[11px] font-bold text-red-700">Two-person sign-off required</p>
+                    <p className="text-[10px] text-red-600 leading-relaxed mt-px">
+                      {unresolvedBlocks} blocking error{unresolvedBlocks !== 1 ? "s" : ""} present. Both Approver and QA signatory must be present before this report can be approved (L1-M11 Rule 11.6).
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
