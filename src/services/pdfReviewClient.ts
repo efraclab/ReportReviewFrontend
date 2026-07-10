@@ -8,8 +8,9 @@ import type { ReviewResult } from "../types/ReviewResult";
 import type { Issue, IssueEvidence, IssueEvidenceCompared, IssueEvidenceTraceStep } from "../types/Issue";
 import type { IssueSeverity } from "../types/DocumentReview";
 import { isHeadCode, type HeadCode } from "../types/Head";
+import { BACKEND_URL } from "../config";
 
-const ENDPOINT = "http://192.168.137.228:5166/api/pdf-review/process";
+const ENDPOINT = `${BACKEND_URL}/api/pdf-review/process`;
 
 // ─── Rich EFRAC prompt (new) ──────────────────────────────────────────────────
 const STRUCTURED_PROMPT = `You are a strict laboratory-report data validator for EFRAC (Edward Food Research & Analysis Centre Ltd), a NABL-accredited food-testing laboratory. You review every PDF I attach for data-quality and field-level defects only. Return ONLY a single valid JSON object — no prose, no commentary, no markdown code fences.
@@ -61,17 +62,22 @@ DATE LOGIC & CHAIN OF CUSTODY (L1-M2)
 MATRIX-PARAMETER APPLICABILITY (L1-M3)
 ────────────────────────────────────────────────────────
 • Every tested parameter must be applicable to the sample matrix. Examples of forbidden parameters:
-  - Packaged Drinking Water (PDW): Protein, Fat, Carbohydrate, Vitamins, Amino acids, Sugars, Cholesterol, Fatty acids, Caffeine, Alcohol → "error".
-  - PDW: Aflatoxin → "error". Methyl Mercury for non-seafood matrices → "error".
+  • Packaged Drinking Water (PDW): Protein, Fat, Carbohydrate, Vitamins, Amino acids, Sugars, Cholesterol, Fatty acids, Caffeine, Alcohol → "error".
+  • PDW: Aflatoxin → "error". Methyl Mercury for non-seafood matrices → "error".
 • Mandatory parameters must be present for the matrix:
-  - PDW per FSSAI 2.10.8: Coliform, TPC, pH, TDS, Hardness, heavy metals panel, 31-compound pesticide panel + Total, Gross Alpha (≤0.1 Bq/L), Gross Beta (≤1.0 Bq/L) → absence of any mandatory parameter → "error".
-  - RTE foods: Listeria monocytogenes mandatory. Raw meat: Salmonella + E. coli O157. Dairy: S. aureus + B. cereus + Salmonella. PDW: 12-organism microbial panel.
+  • PDW per FSSAI 2.10.8: Coliform, TPC, pH, TDS, Hardness, heavy metals panel, 31-compound pesticide panel + Total, Gross Alpha (≤0.1 Bq/L), Gross Beta (≤1.0 Bq/L) → absence of any mandatory parameter → "error".
+  • RTE foods: Listeria monocytogenes mandatory. Raw meat: Salmonella + E. coli O157. Dairy: S. aureus + B. cereus + Salmonella. PDW: 12-organism microbial panel.
 • Speciation completeness: if Methyl Mercury is reported, Total Mercury must also be reported (Total Hg ≥ Methyl Hg). Cr(VI) ≤ Total Cr. Inorganic As ≤ Total As → "error" if violated.
 • Fortification claim: declared nutrient must be >LOQ and within label ±20% per FSSAI +F logo rules → "error" if violated.
 • Label claim match: results must not contradict declared label claims → "error".
 • GMO-free claim + GMO 35S/NOS detected → "error". Organic claim + prohibited substance detected → "error".
 • Result plausibility vs sample type: PDW TPC >100 CFU/mL = alarming flag; honey moisture >25% = implausible → "warning".
 • Fatty acid pattern vs matrix: Fish → high EPA/DHA; coconut → high lauric; olive → high oleic. Significant mismatch → "warning".
+• Mandatory-negative adulteration tests: Argemone Oil, Baudouin Test (and other qualitative adulterant/
+  purity tests reported as Positive/Negative) must always report "Negative" — this is a fixed food-safety
+  requirement, not dependent on any stated Requirements/spec value. A "Positive" result → "error"
+  regardless of what the Requirements column says or whether overall conformance shows Conforms.
+  Cite the specific test name and groupCode/parameter in evidence.
  
 ────────────────────────────────────────────────────────
 INTER-PARAMETER NUMERICAL RULES (L1-M4 — apply whichever are checkable from visible data)
@@ -95,7 +101,17 @@ PROXIMATE / COMPOSITIONAL (4.A)
 • Dry basis value > as-such value for every nutrient (except moisture) → "warning" if violated.
 • Moisture must only be reported on as-such basis, never dry basis → "warning".
 • Ash ≥ Σ(individual minerals after unit conversion to same basis) → "warning".
-• Energy = (Protein×4)+(Carbs×4)+(Fat×9) ± 2 kcal/100g (Atwater) → "warning" if outside.
+• Energy check (BLQ-aware, fibre-aware): use only macros with a genuine numeric Result; exclude any
+  BLQ/BDL/ND macro from the sum (not zero) and note exclusions in evidence.compared.
+  • If Dietary Fibre (or Crude Fibre/Total Dietary Fibre) has a numeric Result: Energy = (Protein×4) +
+    ((Carbohydrate−Fibre)×4) + (Fibre×2) + (Fat×9).
+  • If Fibre is absent: Energy = (Protein×4)+(Carbohydrate×4)+(Fat×9).
+  Compare computed vs reported Energy using actual row values.
+  • Deviation ≤2 kcal or ≤15% of computed value → PASS.
+  • Deviation >15% of computed value → "error" (reported Energy not derived from reported macros).
+  • Otherwise → "warning".
+  Always show in evidence.compared: which formula variant was used (fibre-adjusted or standard), included/
+  excluded macros, computed Energy, and reported Energy. Use only real row values, never invented numbers.
 • Salt (NaCl) ≥ Sodium × 2.5 when both reported → "warning" if violated.
 • kJ = kcal × 4.184 ± 1 kJ → "suggestion" if inconsistent.
 
@@ -107,8 +123,8 @@ WATER CHEMISTRY (4.B)
 • Total Hardness > Calcium Hardness alone AND > Magnesium Hardness alone → "warning".
 • TDS ≈ 0.5–0.7 × Conductivity (µS/cm) for natural waters — e.g. Conductivity 1280 µS/cm implies expected TDS range of 640–896 mg/L. Reported TDS outside this computed range → "warning".
 • Ionic balance (±10%): Σcations (meq/L) ≈ Σanions (meq/L). Cations: Ca²⁺, Mg²⁺, Na⁺, K⁺. Anions: HCO₃⁻, CO₃²⁻, Cl⁻, SO₄²⁻, NO₃⁻. Deviation >10% → "warning"; >20% → "error".
-• BOD ≤ COD (always — BOD is a subset of total oxygen demand) → "error" if violated.
-• BOD/COD ratio 0.1–0.8 typical for wastewater; outside → "warning".
+• BOD ≤ COD (always — BOD is a biological subset of total oxygen demand): locate the numeric Results for "Biochemical Oxygen Demand (BOD)" (or "BOD") and "Chemical Oxygen Demand (COD)" (or "COD") in the actual rows. If both are present with numeric Results, BOD Result must be ≤ COD Result. Violation → "error".
+• BOD/COD ratio check (always attempt if both BOD and COD have numeric Results): divide the actual BOD Result by the actual COD Result to get the ratio. For wastewater and effluent matrices, the expected range is 0.1–0.8. If the computed ratio is outside this range (either below 0.1 or above 0.8), flag as "warning". Illustrative example ONLY (always use actual row values, never these numbers): BOD=5.2, COD=5.4 → ratio=5.2/5.4=0.96 → exceeds 0.8 → "warning". Always show the actual BOD value, COD value, and computed ratio in evidence.compared.
 • Turbidity >1 NTU AND Taste reported as "Agreeable" → contradiction → "warning".
 • Residual Free Chlorine detectable >0.05 mg/L AND Odour reported "Odourless", "Agreeable", or "Pleasant" (no chlorine/chemical odour noted) → contradiction → "warning".
 • Residual Free Chlorine >0.05 mg/L while Odour is reported as Odourless/Agreeable/Pleasant: flag "Chlorine is typically detectable by odour above 0.05 mg/L; reported Odour is inconsistent with the RFC result" → "warning".

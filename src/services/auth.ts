@@ -1,7 +1,7 @@
 import axios from "axios";
+import { FRONTEND_URL } from "../config";
 
-
-const API_BASE_URL = 'http://192.168.2.220:5079/api';
+const API_BASE_URL = `${FRONTEND_URL}/api`;
 
 export async function login(filters = {}) {
   console.log(filters)

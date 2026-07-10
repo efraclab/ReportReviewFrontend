@@ -14,10 +14,11 @@ import type { StoredReviewMeta } from "../types/StoredReview";
 import type { Issue } from "../types/Issue";
 import type { HeadCode } from "../types/Head";
 import type { IssueSeverity } from "../types/DocumentReview";
+import { BACKEND_URL } from "../config";
 
 const API_BASE =
   (import.meta.env?.VITE_REVIEW_API_BASE as string | undefined) ??
-  "http://192.168.137.228:5165";
+  `${BACKEND_URL}`;
 
 export type FindingAction = "pending" | "accepted" | "modified" | "rejected";
 
