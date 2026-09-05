@@ -19,6 +19,7 @@ import { PdfReviewError } from "../services/pdfReviewClient";
 import {
   runRegNoReview,
   type RegNoReviewBundle,
+  type RegNoReviewMode,
 } from "../services/regNoReviewClient";
 import {
   getApproval,
@@ -251,13 +252,17 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
   // Pre-check state
   const [checking, setChecking] = useState(false);
   const [guardRecord, setGuardRecord] = useState<CoaApprovalRecord | null>(null);
+  const [selectedMode, setSelectedMode] = useState<RegNoReviewMode>("full");
 
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
   // ── Core review runner (called after any guard is dismissed) ────────────────
-  const runReview = useCallback(async (trimmed: string) => {
+  const runReview = useCallback(async (
+    trimmed: string,
+    mode: RegNoReviewMode = "full",
+  ) => {
     setLoading(true);
     setStep(0);
     setError(null);
@@ -272,7 +277,7 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
     abortRef.current = controller;
 
     try {
-      const bundle = await runRegNoReview(trimmed, controller.signal);
+      const bundle = await runRegNoReview(trimmed, mode, controller.signal);
       clearInterval(interval);
       setStep(STEPS.length - 1);
       setLoading(false);
@@ -287,11 +292,15 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
   }, [onResult]);
 
   // ── Entry point: pre-check approval status first ────────────────────────────
-  const startReview = useCallback(async (overrideRegNo?: string) => {
+  const startReview = useCallback(async (
+    mode: RegNoReviewMode = "full",
+    overrideRegNo?: string,
+  ) => {
     const trimmed = (overrideRegNo ?? regNo).trim();
     if (!trimmed || loading || checking) return;
 
     setChecking(true);
+    setSelectedMode(mode);
     setError(null);
     try {
       const record = await getApproval(trimmed);
@@ -310,19 +319,19 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
       setChecking(false);
     }
 
-    await runReview(trimmed);
+    await runReview(trimmed, mode);
   }, [regNo, loading, checking, runReview]);
 
   // ── Auto-trigger when a reg number arrives from the URL ─────────────────────
   useEffect(() => {
     if (initialRegNo?.trim()) {
-      startReview(initialRegNo.trim());
+      startReview("full", initialRegNo.trim());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally run once on mount only
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && regNo.trim()) startReview();
+    if (e.key === "Enter" && regNo.trim()) startReview("full");
   };
 
   const isBusy = loading || checking;
@@ -410,32 +419,64 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
             </div>
           </div>
 
-          <button
-            onClick={() => startReview()}
-            disabled={!regNo.trim() || isBusy}
-            className={`
-              mt-6 w-full rounded-2xl py-4 font-bold text-sm flex items-center justify-center gap-2.5
-              transition-all duration-300
-              ${regNo.trim() && !isBusy
-                ? "bg-emerald-600 hover:bg-emerald-700 text-white hover:-translate-y-0.5 active:translate-y-0"
-                : "bg-slate-100 text-slate-400 cursor-not-allowed"}
-            `}
-          >
-            {checking ? (
-              <>
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <button
+              onClick={() => startReview("full")}
+              disabled={!regNo.trim() || isBusy}
+              className={`rounded-2xl py-4 px-3 font-bold text-sm flex items-center justify-center gap-2 transition-all duration-300 ${
+                regNo.trim() && !isBusy
+                  ? "bg-emerald-600 hover:bg-emerald-700 text-white hover:-translate-y-0.5 active:translate-y-0"
+                  : "bg-slate-100 text-slate-400 cursor-not-allowed"
+              }`}
+            >
+              {checking && selectedMode === "full" ? (
                 <RefreshCw size={16} className="animate-spin" />
-                Checking status…
-              </>
-            ) : (
-              <>
+              ) : (
                 <Sparkles size={16} />
-                Run AI review
-              </>
-            )}
-          </button>
-          <p className="text-center text-[11px] text-slate-400 mt-2">
-            Takes 30–90 seconds.
-          </p>
+              )}
+              Full AI Review
+            </button>
+
+            <button
+              onClick={() => startReview("technical")}
+              disabled={!regNo.trim() || isBusy}
+              className={`rounded-2xl py-4 px-3 font-bold text-sm flex items-center justify-center gap-2 transition-all duration-300 ${
+                regNo.trim() && !isBusy
+                  ? "bg-blue-600 hover:bg-blue-700 text-white hover:-translate-y-0.5 active:translate-y-0"
+                  : "bg-slate-100 text-slate-400 cursor-not-allowed"
+              }`}
+            >
+              {checking && selectedMode === "technical" ? (
+                <RefreshCw size={16} className="animate-spin" />
+              ) : (
+                <BookOpen size={16} />
+              )}
+              Technical Review
+            </button>
+
+            <button
+              onClick={() => startReview("administrative")}
+              disabled={!regNo.trim() || isBusy}
+              className={`rounded-2xl py-4 px-3 font-bold text-sm flex items-center justify-center gap-2 transition-all duration-300 ${
+                regNo.trim() && !isBusy
+                  ? "bg-violet-600 hover:bg-violet-700 text-white hover:-translate-y-0.5 active:translate-y-0"
+                  : "bg-slate-100 text-slate-400 cursor-not-allowed"
+              }`}
+            >
+              {checking && selectedMode === "administrative" ? (
+                <RefreshCw size={16} className="animate-spin" />
+              ) : (
+                <FileText size={16} />
+              )}
+              Administrative Review
+            </button>
+          </div>
+
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2">
+            <p className="text-center text-[10px] text-slate-400">All technical + administrative checks</p>
+            <p className="text-center text-[10px] text-slate-400">Parameters, results, spec, method, UOM, LOQ</p>
+            <p className="text-center text-[10px] text-slate-400">Header, customer, dates and document control</p>
+          </div>
         </div>
       </div>
 
@@ -444,7 +485,7 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
         <AlreadyReviewedDialog
           record={guardRecord}
           regNo={regNo.trim()}
-          onContinue={() => runReview(regNo.trim())}
+          onContinue={() => runReview(regNo.trim(), selectedMode)}
           onCancel={() => setGuardRecord(null)}
         />
       )}
@@ -493,7 +534,7 @@ export default function RegNoEntryPage({ onBack, onResult, initialRegNo }: Props
               <div className="mt-6 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => startReview()}
+                    onClick={() => startReview(selectedMode)}
                     disabled={isBusy}
                     className="flex items-center gap-1.5 text-sm font-semibold bg-red-600 hover:bg-red-700 text-white rounded-xl px-4 py-2.5 shadow-md shadow-red-200 transition-all hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-50"
                   >
