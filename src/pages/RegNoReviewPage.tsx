@@ -1096,7 +1096,7 @@ interface Props {
 }
 
 export default function RegNoReviewPage({ bundle, onBack }: Props) {
-  const { result, metadata, correlationId, model, regNo, header, usage } = bundle;
+  const { result, metadata, correlationId, model, regNo, header, usage, reviewMode } = bundle;
   const totalTokens = (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
   const [rows, setRows] = useState<LimsRow[]>(bundle.rows);
 
@@ -1367,7 +1367,7 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
             <button
               onClick={() => exportReviewToPdf(
                 { ...result, documents: [doc], overallScore: doc.score },
-                { fileNames: [doc.fileName ?? regNo], generatedAt: new Date(), metadata: docMeta ? [docMeta] : undefined, correlationId, model, orgName: "Edward Food Research & Analysis Centre Ltd", orgSub: "AQIMA Group · Kolkata · NABL TC-5817" },
+                { fileNames: [doc.fileName ?? regNo], generatedAt: new Date(), metadata: docMeta ? [docMeta] : undefined, correlationId, model, reviewMode, orgName: "Edward Food Research & Analysis Centre Ltd", orgSub: "AQIMA Group · Kolkata · NABL TC-5817" },
               )}
               className="flex items-center gap-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-2 transition-colors"
             >
