@@ -1096,7 +1096,8 @@ interface Props {
 }
 
 export default function RegNoReviewPage({ bundle, onBack }: Props) {
-  const { result, metadata, correlationId, model, regNo, header } = bundle;
+  const { result, metadata, correlationId, model, regNo, header, usage } = bundle;
+  const totalTokens = (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
   const [rows, setRows] = useState<LimsRow[]>(bundle.rows);
 
   const clientName = bundle.rows[0]?.issuedToClientName ?? null;
@@ -1462,6 +1463,33 @@ export default function RegNoReviewPage({ bundle, onBack }: Props) {
                       <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-slate-500">
                         {issuesPercent(doc.score)}%
                       </span>
+                    </div>
+                  </div>
+
+                  {/* AI token usage */}
+                  <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <p className="text-[8px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                        AI Tokens Used
+                      </p>
+                      <span className="text-sm font-black text-slate-900 font-mono tabular-nums">
+                        {totalTokens.toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-md border border-slate-200 bg-white px-2 py-1.5">
+                        <p className="text-[8px] font-bold uppercase tracking-[0.12em] text-slate-400">Input</p>
+                        <p className="text-[10px] font-bold font-mono text-slate-700 tabular-nums">
+                          {(usage?.inputTokens ?? 0).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="rounded-md border border-slate-200 bg-white px-2 py-1.5">
+                        <p className="text-[8px] font-bold uppercase tracking-[0.12em] text-slate-400">Output</p>
+                        <p className="text-[10px] font-bold font-mono text-slate-700 tabular-nums">
+                          {(usage?.outputTokens ?? 0).toLocaleString()}
+                        </p>
+                      </div>
                     </div>
                   </div>
 

@@ -13,6 +13,7 @@ import type {
   RegNoFetchReviewFailure,
   RegNoFetchReviewResponse,
   RegNoFetchReviewSuccess,
+  TokenUsage,
   CoaUpdateRequest,
   CoaUpdateResponse,
 } from "../types/RegNoReview";
@@ -1401,6 +1402,7 @@ export interface RegNoReviewBundle {
   rows: LimsRow[];
   header: LimsHeader | null;
   regNo: string;
+  usage: TokenUsage;
 }
 
 export async function runRegNoReview(
@@ -1445,6 +1447,7 @@ export async function runRegNoReview(
     rows,
     header,
     regNo,
+    usage: success.usage,
   };
 }
 
